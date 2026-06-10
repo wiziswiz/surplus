@@ -304,6 +304,7 @@ export async function runTask(args: RunTaskArgs): Promise<RunnerResult> {
         `[surplus] task=${task.id} attempt=${attempt} provider=claude ` +
         `model=${model} effort=${effort} branch=${branch} started=${new Date(startedAt).toISOString()}\n`,
       startedAt,
+      signal: args.signal,
     });
   } finally {
     finalizeWorktree({ worktreePath, projectPath: project.path, taskId: task.id });
@@ -319,8 +320,10 @@ function runClaudeGoal(opts: {
   onHeartbeat?: (note: string) => void;
   header: string;
   startedAt: number;
+  /** Dispatcher usage-watchdog abort: SIGTERM the worker, outcome 'quota'. */
+  signal?: AbortSignal;
 }): Promise<RunnerResult> {
-  const { argv, cwd, branch, logPath, timeoutMs, onHeartbeat, header, startedAt } = opts;
+  const { argv, cwd, branch, logPath, timeoutMs, onHeartbeat, header, startedAt, signal } = opts;
 
   return new Promise<RunnerResult>((resolve) => {
     const log = createWriteStream(logPath, { flags: 'a' });
@@ -352,6 +355,30 @@ function runClaudeGoal(opts: {
     let spawnError: Error | null = null;
     let timedOut = false;
     let settled = false;
+    let watchdogAborted = false;
+
+    const onAbort = (): void => {
+      if (settled) return;
+      watchdogAborted = true;
+      log.write('\n[surplus] usage watchdog abort — terminating worker\n');
+      try {
+        child.kill('SIGTERM');
+      } catch {
+        /* ignore */
+      }
+      const killTimer = setTimeout(() => {
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          /* ignore */
+        }
+      }, KILL_GRACE_MS);
+      killTimer.unref?.();
+    };
+    if (signal !== undefined) {
+      if (signal.aborted) onAbort();
+      else signal.addEventListener('abort', onAbort, { once: true });
+    }
 
     const appendRecent = (text: string): void => {
       recent = (recent + text).slice(-RECENT_KEEP);
@@ -451,7 +478,9 @@ function runClaudeGoal(opts: {
       summary = redactSecrets(summary);
 
       let outcome: RunOutcome;
-      if (timedOut) {
+      if (watchdogAborted) {
+        outcome = 'quota'; // reserve ceiling crossed mid-run
+      } else if (timedOut) {
         outcome = 'timeout';
       } else if (spawnError !== null) {
         outcome = 'error';

@@ -210,7 +210,8 @@ separately (`judge.model`) and always runs on claude.
 - **Branches only, never pushes.** Work happens in a git worktree under
   `~/.surplus/worktrees/<task-id>` on a `surplus/<task-id>` branch. Merging
   is yours to do, after reading the diff.
-- **No bypass modes.** The claude worker runs with permission-mode `auto`;
+- **No bypass modes.** The claude worker runs with permission-mode
+  `acceptEdits` plus an explicit tool allowlist (with `git push` denied);
   the codex worker runs inside codex's sandbox. surplus never passes
   skip-permissions / bypass flags.
 - **Kill switch.** `surplus pause` creates `~/.surplus/PAUSED`; every tick
@@ -227,6 +228,27 @@ separately (`judge.model`) and always runs on claude.
 - **Tokens never logged.** The OAuth token is read at call time, held in
   memory, and redacted from any error text. Nothing secret is written to
   `~/.surplus` or the repo.
+
+## Sharing the subscription with other agents
+
+If always-on assistants (OpenClaw, Hermes, scheduled Claude/Codex crons) run
+on the same subscriptions, a naive burner would starve them right when it
+"wins." surplus treats part of every window as a protected **reserve**:
+
+```jsonc
+"reserve": {
+  "weeklyPct": 10,          // never burn the last 10% of the 7-day window
+  "fiveHourPct": 25,        // never launch when <25% of the 5h window remains
+  "watchdogIntervalMinutes": 5
+}
+```
+
+The reserve tightens every threshold (effective weekly stop =
+`min(stopAtPct, 100 - weeklyPct)`; same for 5h pacing and burst gates), and a
+**mid-run watchdog** re-polls usage during long runs — if a ceiling is crossed
+mid-run, the worker is terminated (`quota` outcome), the dispatch loop halts,
+and your other agents keep their headroom. Defaults leave 10% weekly and 25%
+of each 5h window untouched.
 
 ## Config reference
 

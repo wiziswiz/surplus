@@ -59,6 +59,13 @@ export function decide(input: DecideInput): Decision {
   const weekly = config.modes.weeklySurplus;
   const burst = config.modes.fiveHourBurst;
 
+  // Reserve floors: quota protected for OTHER agents sharing the same
+  // subscription (OpenClaw/Hermes crons, interactive use). The effective
+  // ceilings are the stricter of the mode target and the reserve floor.
+  const reserve = config.reserve;
+  const effWeeklyStopPct = Math.min(weekly.stopAtPct, 100 - reserve.weeklyPct);
+  const effFiveHourPausePct = Math.min(config.pacing.fiveHourPausePct, 100 - reserve.fiveHourPct);
+
   // 3. weeklySurplus: burn leftover weekly quota in the window before the
   //    7-day reset. Wins over fiveHourBurst when both are eligible.
   if (weekly.enabled && sevenDayResetMs != null) {
@@ -83,21 +90,28 @@ export function decide(input: DecideInput): Decision {
       // null pcts conservatively DISABLE the burst.)
       const effSevenDayPct = sevenDayPct ?? 0;
 
-      if (effSevenDayPct >= weekly.stopAtPct) {
-        // Exactly at stopAtPct counts as hit — no burn.
+      if (effSevenDayPct >= effWeeklyStopPct) {
+        // Exactly at the ceiling counts as hit — no burn.
+        const why =
+          effWeeklyStopPct < weekly.stopAtPct
+            ? `reserve floor (${reserve.weeklyPct}% kept for other agents)`
+            : `stop target ${weekly.stopAtPct}%`;
         return {
           action: 'stop',
-          reason: `weekly target hit: 7-day window at ${effSevenDayPct}% (stop at ${weekly.stopAtPct}%)`,
+          reason: `weekly ceiling hit: 7-day window at ${effSevenDayPct}% (${why})`,
           nextCheckAt: sevenDayResetMs,
         };
       }
 
-      if (fiveHourPct != null && fiveHourPct >= config.pacing.fiveHourPausePct) {
+      if (fiveHourPct != null && fiveHourPct >= effFiveHourPausePct) {
         return {
           action: 'pace-wait',
           reason:
-            `5h window hot (${fiveHourPct}% >= ${config.pacing.fiveHourPausePct}%); ` +
-            `waiting for 5h reset before burning weekly surplus`,
+            `5h window hot (${fiveHourPct}% >= ${effFiveHourPausePct}%` +
+            (effFiveHourPausePct < config.pacing.fiveHourPausePct
+              ? `, ${reserve.fiveHourPct}% reserved for other agents`
+              : '') +
+            `); waiting for 5h reset before burning weekly surplus`,
           nextCheckAt: fiveHourResetMs ?? now + FALLBACK_POLL_MS,
         };
       }
@@ -109,7 +123,7 @@ export function decide(input: DecideInput): Decision {
         mode: 'weeklySurplus',
         reason:
           `weekly surplus: ${100 - effSevenDayPct}% of weekly quota remaining ` +
-          `(used ${effSevenDayPct}%, stop at ${weekly.stopAtPct}%), ` +
+          `(used ${effSevenDayPct}%, stop at ${effWeeklyStopPct}%), ` +
           `7-day reset in ${fmtDuration(sevenDayResetMs - now)}${pacingNote}`,
       };
     }
@@ -122,10 +136,11 @@ export function decide(input: DecideInput): Decision {
   //    the mode (no stop): the burst gate is opportunistic, not load-bearing.
   if (burst.enabled && fiveHourResetMs != null && fiveHourResetMs > now) {
     const msLeft = fiveHourResetMs - now;
+    const effBurstWeeklyGuardPct = Math.min(burst.weeklyGuardPct, 100 - reserve.weeklyPct);
     if (
       msLeft <= burst.triggerMinutesBeforeReset * MINUTE_MS &&
-      (fiveHourPct ?? 100) < 100 &&
-      (sevenDayPct ?? 100) < burst.weeklyGuardPct
+      (fiveHourPct ?? 100) < 100 - reserve.fiveHourPct &&
+      (sevenDayPct ?? 100) < effBurstWeeklyGuardPct
     ) {
       return {
         action: 'burn',

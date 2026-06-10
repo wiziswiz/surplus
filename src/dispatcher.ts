@@ -230,6 +230,47 @@ async function runOne(
   db.appendEvent('run-started', task.id, { runId: run.id, provider, model, effort });
   log(`dispatch: run ${run.id} started for task ${task.id} on ${provider} (${model}/${effort})`);
 
+  // Mid-run usage watchdog: polls this provider's usage on a cadence and
+  // aborts the worker when a reserve ceiling is crossed, so a long run can't
+  // starve other agents (OpenClaw/Hermes crons) sharing the subscription.
+  // Ceilings get +5pct slack over the launch thresholds (capped at 95) so a
+  // run isn't killed for the last request that tipped the launch check.
+  const reserve = deps.config.reserve;
+  const weeklyCeil = Math.min(
+    95,
+    Math.min(deps.config.modes.weeklySurplus.stopAtPct, 100 - reserve.weeklyPct) + 5,
+  );
+  const fiveHourCeil = Math.min(
+    95,
+    Math.min(deps.config.pacing.fiveHourPausePct, 100 - reserve.fiveHourPct) + 5,
+  );
+  const watchdogMs = Math.max(1, reserve.watchdogIntervalMinutes) * 60_000;
+  const abort = new AbortController();
+  const watchdog = setInterval(() => {
+    void adapter
+      .getUsage()
+      .then((u) => {
+        if (u == null || u.unavailable || abort.signal.aborted) return;
+        const fiveHot = u.fiveHourPct != null && u.fiveHourPct >= fiveHourCeil;
+        const weeklyHot = u.sevenDayPct != null && u.sevenDayPct >= weeklyCeil;
+        if (fiveHot || weeklyHot) {
+          const why = fiveHot
+            ? `5h window ${u.fiveHourPct}% >= ceiling ${fiveHourCeil}%`
+            : `7-day window ${u.sevenDayPct}% >= ceiling ${weeklyCeil}%`;
+          db.appendEvent('run-heartbeat', task.id, {
+            runId: run.id,
+            note: `usage watchdog aborting run: ${why} (reserve protects other agents)`,
+          });
+          log(`dispatch: watchdog aborting run ${run.id} — ${why}`);
+          abort.abort(new Error(`usage watchdog: ${why}`));
+        }
+      })
+      .catch(() => {
+        /* watchdog polling must never crash a run */
+      });
+  }, watchdogMs);
+  watchdog.unref?.();
+
   let result: RunnerResult;
   try {
     result = await adapter.runTask({
@@ -245,6 +286,7 @@ async function runOne(
       },
       logsDir,
       worktreesDir,
+      signal: abort.signal,
     });
   } catch (err) {
     result = {
@@ -256,6 +298,12 @@ async function runOne(
       startedAt: run.startedAt,
       endedAt: nowFn(),
     };
+  } finally {
+    clearInterval(watchdog);
+  }
+  // A watchdog abort is a quota stop regardless of how the runner reported it.
+  if (abort.signal.aborted && result.outcome !== 'quota') {
+    result = { ...result, outcome: 'quota', summary: `${result.summary}\n[surplus] aborted by usage watchdog.` };
   }
 
   // Judge — skipped for sessions that never completed (error/timeout/killed/quota).

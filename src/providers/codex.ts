@@ -449,6 +449,7 @@ export function codexAdapter(config: SurplusConfig, deps: CodexAdapterDeps = {})
       }
 
       let timedOut = false;
+      let watchdogAborted = false;
       let graceTimer: NodeJS.Timeout | undefined;
       const timeoutMs = args.config.dispatcher.taskTimeoutMinutes * 60_000;
       const killTimer = setTimeout(() => {
@@ -456,6 +457,22 @@ export function codexAdapter(config: SurplusConfig, deps: CodexAdapterDeps = {})
         child.kill('SIGTERM');
         graceTimer = setTimeout(() => child.kill('SIGKILL'), SIGKILL_GRACE_MS);
       }, timeoutMs);
+
+      // Dispatcher usage-watchdog abort (reserve ceiling crossed) → 'quota'.
+      const onAbort = (): void => {
+        watchdogAborted = true;
+        logStream.write('\n[surplus] usage watchdog abort — terminating codex worker\n');
+        try {
+          child.kill('SIGTERM');
+        } catch {
+          /* ignore */
+        }
+        graceTimer = setTimeout(() => child.kill('SIGKILL'), SIGKILL_GRACE_MS);
+      };
+      if (args.signal !== undefined) {
+        if (args.signal.aborted) onAbort();
+        else args.signal.addEventListener('abort', onAbort, { once: true });
+      }
 
       const heartbeat = setInterval(() => {
         const elapsedMin = Math.round((now() - startedAt) / 60_000);
@@ -486,13 +503,15 @@ export function codexAdapter(config: SurplusConfig, deps: CodexAdapterDeps = {})
       if (!summary) summary = outputTail.slice(-2000).trim();
       summary = redactSecrets(summary);
 
-      const outcome = classifyExit({
-        timedOut,
-        signal: exit.signal,
-        exitCode: exit.code,
-        outputTail,
-        summary,
-      });
+      const outcome = watchdogAborted
+        ? 'quota' // reserve ceiling crossed mid-run
+        : classifyExit({
+            timedOut,
+            signal: exit.signal,
+            exitCode: exit.code,
+            outputTail,
+            summary,
+          });
 
       return {
         outcome,

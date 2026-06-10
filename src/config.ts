@@ -91,6 +91,11 @@ export function defaultConfig(): SurplusConfig {
     pacing: {
       fiveHourPausePct: 90,
     },
+    reserve: {
+      weeklyPct: 10,
+      fiveHourPct: 25,
+      watchdogIntervalMinutes: 5,
+    },
     dispatcher: {
       maxConcurrent: 1,
       maxAttempts: 3,

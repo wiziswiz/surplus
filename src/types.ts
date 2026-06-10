@@ -114,6 +114,22 @@ export interface SurplusConfig {
     /** Between task launches, wait for 5h reset when 5h utilization >= this. Default 90. */
     fiveHourPausePct: number;
   };
+  /**
+   * Protected quota floor for OTHER agents sharing the same subscriptions
+   * (OpenClaw/Hermes crons, interactive use). surplus treats reserved quota
+   * as untouchable: effective weekly stop = min(stopAtPct, 100 - weeklyPct);
+   * effective 5h pause = min(fiveHourPausePct, 100 - fiveHourPct). A mid-run
+   * watchdog polls usage every watchdogIntervalMinutes and kills the worker
+   * (outcome 'quota') if a ceiling is crossed mid-run.
+   */
+  reserve: {
+    /** % of the weekly window always left for other tools. Default 10. */
+    weeklyPct: number;
+    /** % of the 5h window always left for other tools. Default 25. */
+    fiveHourPct: number;
+    /** Mid-run usage poll cadence, minutes. Default 5 (matches usage cache TTL). */
+    watchdogIntervalMinutes: number;
+  };
   dispatcher: {
     /** Max simultaneous running tasks. Default 1. */
     maxConcurrent: number;
@@ -343,6 +359,12 @@ export interface RunTaskArgs {
   onHeartbeat?: (note: string) => void;
   logsDir: string;
   worktreesDir: string;
+  /**
+   * Aborted by the dispatcher's usage watchdog when a reserve ceiling is
+   * crossed mid-run. Runners SIGTERM the worker and return outcome 'quota'
+   * (which also trips the dispatch respawn guard).
+   */
+  signal?: AbortSignal;
 }
 
 export interface ProviderAdapter {
