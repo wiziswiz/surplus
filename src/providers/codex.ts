@@ -378,7 +378,7 @@ export function codexAdapter(config: SurplusConfig, deps: CodexAdapterDeps = {})
     }
 
     const startedAt = now();
-    const attempt = (args.task.attempts ?? 0) + 1;
+    const attempt = Math.max(1, args.task.attempts ?? 1); // claim pre-increments
     await mkdir(args.logsDir, { recursive: true });
     const logPath = join(args.logsDir, `${args.task.id}-attempt${attempt}-codex.log`);
     const lastMessagePath = join(args.logsDir, `${args.task.id}-attempt${attempt}-codex.last.txt`);

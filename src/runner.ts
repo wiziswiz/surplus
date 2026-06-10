@@ -60,6 +60,10 @@ export interface ClaudeJsonEnvelope {
   result: string | null;
   /** `is_error` field; null when unparseable. */
   isError: boolean | null;
+  /** `num_turns` field; null when absent. */
+  numTurns: number | null;
+  /** Count of `permission_denials`; null when absent. */
+  denials: number | null;
 }
 
 /**
@@ -83,14 +87,18 @@ export function parseClaudeEnvelope(stdout: string): ClaudeJsonEnvelope {
       const obj = parsed as Record<string, unknown>;
       const result = typeof obj['result'] === 'string' ? (obj['result'] as string) : null;
       const isError = typeof obj['is_error'] === 'boolean' ? (obj['is_error'] as boolean) : null;
+      const numTurns = typeof obj['num_turns'] === 'number' ? (obj['num_turns'] as number) : null;
+      const denials = Array.isArray(obj['permission_denials'])
+        ? (obj['permission_denials'] as unknown[]).length
+        : null;
       if (result !== null || isError !== null || obj['type'] === 'result') {
-        return { result, isError };
+        return { result, isError, numTurns, denials };
       }
     } catch {
       /* try next candidate */
     }
   }
-  return { result: null, isError: null };
+  return { result: null, isError: null, numTurns: null, denials: null };
 }
 
 function tail(text: string, n: number): string {
@@ -232,7 +240,9 @@ export async function runTask(args: RunTaskArgs): Promise<RunnerResult> {
   const startedAt = Date.now();
 
   mkdirSync(logsDir, { recursive: true });
-  const attempt = (task.attempts ?? 0) + 1;
+  // claimNextReadyTask increments attempts atomically at claim time, so the
+  // row we receive already reflects THIS attempt's number.
+  const attempt = Math.max(1, task.attempts ?? 1);
   const logPath = path.join(logsDir, `${task.id}-attempt${attempt}.log`);
 
   let worktreePath: string;
@@ -260,6 +270,11 @@ export async function runTask(args: RunTaskArgs): Promise<RunnerResult> {
     judgeFeedback: args.judgeFeedback ?? null,
   });
 
+  // Permission recipe verified empirically: 'auto'/'acceptEdits' alone deny
+  // Bash in headless -p (no human to approve -> denial storm, 36 denials in
+  // the first smoke run). acceptEdits + an explicit Bash/Edit/Write allowlist
+  // runs unattended with zero denials, while git push stays blocked both by
+  // the disallow rule and the goal-condition guardrail.
   const argv = [
     '-p',
     '--model',
@@ -267,7 +282,11 @@ export async function runTask(args: RunTaskArgs): Promise<RunnerResult> {
     '--effort',
     effort,
     '--permission-mode',
-    'auto',
+    'acceptEdits',
+    '--allowedTools',
+    'Bash(*) Edit Write WebFetch WebSearch',
+    '--disallowedTools',
+    'Bash(git push*)',
     '--output-format',
     'json',
     `/goal ${condition}`,
@@ -416,8 +435,18 @@ function runClaudeGoal(opts: {
             ? tail(stderrTail.trim(), 2000)
             : `claude exited with code ${String(code)}${signal !== null ? ` (signal ${signal})` : ''}`;
       } else {
-        // exit 0 but unparseable JSON — fall back to the raw stdout tail
-        summary = tail(stdoutBuf.trim(), 2000);
+        // exit 0 but no usable result text — summarize the session diagnostics
+        // instead of dumping the raw JSON envelope (which reads as garbage to
+        // the judge and the board).
+        const parts: string[] = ['session completed without final result text'];
+        if (envelope.numTurns !== null) parts.push(`${envelope.numTurns} turns`);
+        if (envelope.denials !== null && envelope.denials > 0) {
+          parts.push(`${envelope.denials} permission denials (check runner allowlist flags)`);
+        }
+        summary = `${parts.join('; ')}; last output: ${lastLineSnippet()}`;
+      }
+      if (envelope.denials !== null && envelope.denials > 0 && envelope.result !== null) {
+        summary += `\n[surplus] note: ${envelope.denials} tool calls were permission-denied this session.`;
       }
       summary = redactSecrets(summary);
 
