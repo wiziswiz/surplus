@@ -1,0 +1,36 @@
+{
+  "name": "surplus",
+  "version": "0.1.0",
+  "description": "Burn your expiring Claude subscription quota on backlog projects — weekly-surplus aware, /goal-driven, judge-verified.",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "surplus": "./bin/surplus.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "build:board": "cd board && npm run build",
+    "build:all": "npm run build && npm run build:board",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dev": "tsx src/cli.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.14.0",
+    "better-sqlite3": "^12.4.1",
+    "commander": "^14.0.0",
+    "gray-matter": "^4.0.3",
+    "hono": "^4.7.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}

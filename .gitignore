@@ -1,0 +1,24 @@
+# deps & build
+node_modules/
+dist/
+board/node_modules/
+board/dist/
+
+# runtime state — NEVER commit (lives in ~/.surplus, but belt & suspenders)
+.surplus/
+*.db
+*.db-wal
+*.db-shm
+.usage-cache.json
+
+# secrets — this project reads ~/.claude/.credentials.json at call time only;
+# no token may ever be written into this repo
+.credentials.json
+*.token
+.env
+.env.*
+
+# logs & scratch
+logs/
+*.log
+.DS_Store

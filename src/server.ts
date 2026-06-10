@@ -1,0 +1,546 @@
+/**
+ * surplus — board HTTP server.
+ *
+ * Hono + @hono/node-server implementing the REST/SSE contract at the bottom
+ * of types.ts, plus static serving of board/dist.
+ *
+ * SECURITY:
+ *  - Binds 127.0.0.1 ONLY. This server can trigger code execution (burn).
+ *  - Every id from the wire is validated against /^[a-z0-9_-]+$/i before ANY use.
+ *  - No credentials/tokens ever appear in responses; error text is redacted.
+ */
+import { Hono } from 'hono';
+import type { Context } from 'hono';
+import { streamSSE } from 'hono/streaming';
+import { serve } from '@hono/node-server';
+import type { ServerType } from '@hono/node-server';
+import { serveStatic } from '@hono/node-server/serve-static';
+import { existsSync, statSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import type {
+  ApiState,
+  DecideInput,
+  Decision,
+  ProjectRow,
+  Provider,
+  ProviderAdapter,
+  ProviderPref,
+  SurplusConfig,
+  TaskEventRow,
+  TaskEventType,
+  TaskRow,
+  TaskRunRow,
+  TaskStatus,
+  UsageSnapshot,
+} from './types.js';
+
+// ---------------------------------------------------------------------------
+// Structural db interface (subset of db.ts the server needs)
+// ---------------------------------------------------------------------------
+
+export interface ServerDb {
+  listProjects(): ProjectRow[];
+  getProject(id: string): ProjectRow | undefined | null;
+  insertProject(row: ProjectRow): void;
+  /** No arg → all non-archived tasks. */
+  listTasks(status?: TaskStatus): TaskRow[];
+  getTask(id: string): TaskRow | undefined | null;
+  insertTask(row: TaskRow): void;
+  updateTask(id: string, patch: Partial<TaskRow>): TaskRow | undefined | null;
+  listRuns(taskId: string): TaskRunRow[];
+  listEventsForTask(taskId: string, limit?: number): TaskEventRow[];
+  /** Rows with id > afterId, ascending. */
+  eventsAfter(afterId: number, limit?: number): TaskEventRow[];
+  /** Most recent `limit` rows, ascending by id. */
+  lastEvents(limit: number): TaskEventRow[];
+  appendEvent(type: TaskEventType, taskId: string | null, data: unknown): TaskEventRow;
+}
+
+export interface ServerDeps {
+  /** Draft VISION.md for an existing repo that lacks one. */
+  draftVision?: (project: ProjectRow) => Promise<unknown>;
+  /** Create a brand-new project (dir + git init + VISION.md); returns the row. */
+  scaffoldProject?: (name: string) => Promise<ProjectRow>;
+  /** Manual one-shot dispatch (ignores windows, respects pacing). */
+  triggerBurn?: (taskId?: string, provider?: Provider) => Promise<unknown>;
+}
+
+export interface StartServerOptions {
+  port: number;
+  db: ServerDb;
+  config: SurplusConfig;
+  adapters: Partial<Record<Provider, ProviderAdapter>>;
+  decideFn: (input: DecideInput) => Decision;
+  paused: () => boolean;
+  setPaused: (b: boolean) => void;
+  deps?: ServerDeps;
+  /** Optional: abort to shut the server down (tests / cli graceful exit). */
+  signal?: AbortSignal;
+}
+
+// ---------------------------------------------------------------------------
+// Validation & helpers
+// ---------------------------------------------------------------------------
+
+const ID_RE = /^[a-z0-9_-]+$/i;
+const PROVIDERS: readonly Provider[] = ['claude', 'codex'];
+const PROVIDER_PREFS: readonly ProviderPref[] = ['claude', 'codex', 'any'];
+const TASK_STATUSES: readonly TaskStatus[] = [
+  'triage', 'todo', 'ready', 'running', 'blocked', 'done', 'archived',
+];
+
+function validId(id: unknown): id is string {
+  return typeof id === 'string' && id.length > 0 && id.length <= 64 && ID_RE.test(id);
+}
+
+function isProvider(v: unknown): v is Provider {
+  return typeof v === 'string' && (PROVIDERS as readonly string[]).includes(v);
+}
+
+function isProviderPref(v: unknown): v is ProviderPref {
+  return typeof v === 'string' && (PROVIDER_PREFS as readonly string[]).includes(v);
+}
+
+function isTaskStatus(v: unknown): v is TaskStatus {
+  return typeof v === 'string' && (TASK_STATUSES as readonly string[]).includes(v);
+}
+
+/** Strip anything that looks like a credential from error text. */
+export function redact(text: string): string {
+  return text
+    .replace(/sk-[A-Za-z0-9_-]{8,}/g, '[redacted]')
+    .replace(/Bearer\s+\S+/gi, 'Bearer [redacted]')
+    .replace(/eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+\.?[A-Za-z0-9_-]*/g, '[redacted]')
+    .replace(/(accessToken|access_token|refresh_token|authorization)["':\s=]+\S+/gi, '$1=[redacted]');
+}
+
+function errMsg(e: unknown): string {
+  return redact(e instanceof Error ? e.message : String(e));
+}
+
+async function readJson(c: Context): Promise<Record<string, unknown> | null> {
+  try {
+    const text = await c.req.text();
+    if (!text.trim()) return {};
+    const v: unknown = JSON.parse(text);
+    if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
+      return v as Record<string, unknown>;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function genTaskId(): string {
+  return `t_${randomBytes(8).toString('hex')}`; // alphanumeric + underscore only
+}
+
+/** Project id: alphanumeric + dashes only (per ProjectRow contract). */
+export function slugifyProjectId(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64);
+}
+
+/** Fields the board may PATCH. 'running' transitions are dispatcher-only. */
+export function buildTaskPatch(
+  body: Record<string, unknown>,
+): { ok: true; patch: Partial<TaskRow> } | { ok: false; error: string } {
+  const patch: Partial<TaskRow> = {};
+  if ('status' in body) {
+    if (!isTaskStatus(body.status)) return { ok: false, error: 'invalid status' };
+    if (body.status === 'running') {
+      return { ok: false, error: "cannot set status to 'running' (dispatcher-only)" };
+    }
+    patch.status = body.status;
+  }
+  if ('priority' in body) {
+    if (typeof body.priority !== 'number' || !Number.isFinite(body.priority)) {
+      return { ok: false, error: 'priority must be a number' };
+    }
+    patch.priority = Math.round(body.priority);
+  }
+  if ('title' in body) {
+    if (typeof body.title !== 'string' || !body.title.trim()) {
+      return { ok: false, error: 'title must be a non-empty string' };
+    }
+    patch.title = body.title.trim();
+  }
+  if ('body' in body) {
+    if (typeof body.body !== 'string') return { ok: false, error: 'body must be a string' };
+    patch.body = body.body;
+  }
+  if ('model' in body) {
+    if (body.model !== null && typeof body.model !== 'string') {
+      return { ok: false, error: 'model must be a string or null' };
+    }
+    patch.model = body.model;
+  }
+  if ('effort' in body) {
+    if (body.effort !== null && typeof body.effort !== 'string') {
+      return { ok: false, error: 'effort must be a string or null' };
+    }
+    patch.effort = body.effort;
+  }
+  if ('scheduledAt' in body) {
+    if (body.scheduledAt !== null && typeof body.scheduledAt !== 'number') {
+      return { ok: false, error: 'scheduledAt must be a number or null' };
+    }
+    patch.scheduledAt = body.scheduledAt;
+  }
+  if ('provider' in body) {
+    if (!isProviderPref(body.provider)) return { ok: false, error: 'invalid provider' };
+    patch.provider = body.provider;
+  }
+  if (Object.keys(patch).length === 0) return { ok: false, error: 'no patchable fields' };
+  return { ok: true, patch };
+}
+
+// ---------------------------------------------------------------------------
+// startServer
+// ---------------------------------------------------------------------------
+
+export async function startServer(opts: StartServerOptions): Promise<void> {
+  const { db, config, adapters, decideFn, paused, setPaused, deps } = opts;
+  const app = new Hono();
+
+  // --- shared state builders ------------------------------------------------
+
+  async function buildState(): Promise<ApiState> {
+    const usage: ApiState['usage'] = {};
+    const decisions: ApiState['decisions'] = {};
+    const now = Date.now();
+    const isPaused = paused();
+    for (const prov of PROVIDERS) {
+      const adapter = adapters[prov];
+      if (!adapter) continue;
+      let snap: UsageSnapshot | null = null;
+      try {
+        snap = await adapter.getUsage(); // adapter caches internally
+      } catch {
+        snap = null;
+      }
+      usage[prov] = snap;
+      const effective: UsageSnapshot = snap ?? {
+        provider: prov,
+        planName: null,
+        fiveHourPct: null,
+        sevenDayPct: null,
+        fiveHourResetsAt: null,
+        sevenDayResetsAt: null,
+        unavailable: true,
+        error: 'unavailable',
+        fetchedAt: now,
+      };
+      try {
+        decisions[prov] = decideFn({ usage: effective, config, now, paused: isPaused });
+      } catch (e) {
+        decisions[prov] = { action: 'stop', reason: `decision error: ${errMsg(e)}` };
+      }
+    }
+    return {
+      usage,
+      decisions,
+      paused: isPaused,
+      config,
+      running: db.listTasks('running').map((t) => t.id),
+    };
+  }
+
+  // --- error / 404 ----------------------------------------------------------
+
+  app.onError((e, c) => c.json({ error: errMsg(e) }, 500));
+
+  // --- state ------------------------------------------------------------------
+
+  app.get('/api/state', async (c) => c.json(await buildState()));
+
+  // --- projects ---------------------------------------------------------------
+
+  app.get('/api/projects', (c) => c.json(db.listProjects()));
+
+  app.post('/api/projects', async (c) => {
+    const body = await readJson(c);
+    if (!body) return c.json({ error: 'invalid JSON body' }, 400);
+
+    // Existing repo: {path}
+    if (typeof body.path === 'string' && body.path.length > 0) {
+      const p = body.path;
+      if (!path.isAbsolute(p)) return c.json({ error: 'path must be absolute' }, 400);
+      let isDir = false;
+      try {
+        isDir = statSync(p).isDirectory();
+      } catch {
+        isDir = false;
+      }
+      if (!isDir) return c.json({ error: 'path is not an existing directory' }, 400);
+      if (!existsSync(path.join(p, '.git'))) {
+        return c.json({ error: 'directory is not a git repository' }, 400);
+      }
+      const name = path.basename(p);
+      const id = slugifyProjectId(name);
+      if (!id) return c.json({ error: 'cannot derive a project id from path' }, 400);
+      if (db.getProject(id)) return c.json({ error: `project '${id}' already exists` }, 409);
+      const row: ProjectRow = {
+        id,
+        name,
+        path: p,
+        visionPath: path.join(p, 'VISION.md'),
+        provider: 'any',
+        model: null,
+        effort: null,
+        createdAt: Date.now(),
+      };
+      if (!existsSync(row.visionPath) && deps?.draftVision) {
+        try {
+          await deps.draftVision(row);
+        } catch (e) {
+          return c.json({ error: `failed to draft VISION.md: ${errMsg(e)}` }, 502);
+        }
+      }
+      db.insertProject(row);
+      return c.json(row, 201);
+    }
+
+    // New project: {name}
+    if (typeof body.name === 'string' && body.name.trim().length > 0) {
+      if (!deps?.scaffoldProject) {
+        return c.json({ error: 'project scaffolding not available' }, 501);
+      }
+      const name = body.name.trim();
+      if (!slugifyProjectId(name)) return c.json({ error: 'invalid project name' }, 400);
+      let row: ProjectRow;
+      try {
+        row = await deps.scaffoldProject(name);
+      } catch (e) {
+        return c.json({ error: `scaffold failed: ${errMsg(e)}` }, 502);
+      }
+      if (!db.getProject(row.id)) db.insertProject(row);
+      return c.json(row, 201);
+    }
+
+    return c.json({ error: 'body must be {path} or {name}' }, 400);
+  });
+
+  // --- tasks ------------------------------------------------------------------
+
+  app.get('/api/tasks', (c) => {
+    const status = c.req.query('status');
+    if (status !== undefined) {
+      if (!isTaskStatus(status)) return c.json({ error: 'invalid status filter' }, 400);
+      return c.json(db.listTasks(status));
+    }
+    return c.json(db.listTasks()); // all non-archived
+  });
+
+  app.post('/api/tasks', async (c) => {
+    const body = await readJson(c);
+    if (!body) return c.json({ error: 'invalid JSON body' }, 400);
+    if (!validId(body.projectId)) return c.json({ error: 'invalid projectId' }, 400);
+    if (typeof body.title !== 'string' || !body.title.trim()) {
+      return c.json({ error: 'title is required' }, 400);
+    }
+    const project = db.getProject(body.projectId);
+    if (!project) return c.json({ error: 'unknown project' }, 404);
+
+    let status: TaskStatus = 'triage';
+    if ('status' in body) {
+      if (!isTaskStatus(body.status) || body.status === 'running') {
+        return c.json({ error: 'invalid initial status' }, 400);
+      }
+      status = body.status;
+    }
+    if ('parentId' in body && body.parentId !== null && !validId(body.parentId)) {
+      return c.json({ error: 'invalid parentId' }, 400);
+    }
+    const now = Date.now();
+    const task: TaskRow = {
+      id: genTaskId(),
+      projectId: body.projectId,
+      title: body.title.trim(),
+      body: typeof body.body === 'string' ? body.body : '',
+      status,
+      priority:
+        typeof body.priority === 'number' && Number.isFinite(body.priority)
+          ? Math.round(body.priority)
+          : 100,
+      attempts: 0,
+      maxAttempts: config.dispatcher.maxAttempts,
+      provider: isProviderPref(body.provider) ? body.provider : 'any',
+      model: typeof body.model === 'string' ? body.model : null,
+      effort: typeof body.effort === 'string' ? body.effort : null,
+      judgeFeedback: null,
+      parentId: validId(body.parentId) ? body.parentId : null,
+      scheduledAt: typeof body.scheduledAt === 'number' ? body.scheduledAt : null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    db.insertTask(task);
+    db.appendEvent('task-created', task.id, { task });
+    return c.json(task, 201);
+  });
+
+  app.get('/api/tasks/:id', (c) => {
+    const id = c.req.param('id');
+    if (!validId(id)) return c.json({ error: 'invalid task id' }, 400);
+    const task = db.getTask(id);
+    if (!task) return c.json({ error: 'task not found' }, 404);
+    return c.json({
+      task,
+      runs: db.listRuns(id),
+      events: db.listEventsForTask(id, 200),
+    });
+  });
+
+  app.patch('/api/tasks/:id', async (c) => {
+    const id = c.req.param('id');
+    if (!validId(id)) return c.json({ error: 'invalid task id' }, 400);
+    const task = db.getTask(id);
+    if (!task) return c.json({ error: 'task not found' }, 404);
+    const body = await readJson(c);
+    if (!body) return c.json({ error: 'invalid JSON body' }, 400);
+    const built = buildTaskPatch(body);
+    if (!built.ok) return c.json({ error: built.error }, 400);
+    const patch = { ...built.patch, updatedAt: Date.now() };
+    const updated = db.updateTask(id, patch) ?? db.getTask(id);
+    if (!updated) return c.json({ error: 'task not found' }, 404);
+    if (built.patch.status && built.patch.status !== task.status) {
+      db.appendEvent('status-changed', id, { from: task.status, to: built.patch.status });
+    } else {
+      db.appendEvent('task-updated', id, { fields: Object.keys(built.patch) });
+    }
+    return c.json(updated);
+  });
+
+  // --- pause / resume / burn ---------------------------------------------------
+
+  app.post('/api/pause', (c) => {
+    setPaused(true);
+    return c.json({ paused: true });
+  });
+
+  app.post('/api/resume', (c) => {
+    setPaused(false);
+    return c.json({ paused: false });
+  });
+
+  app.post('/api/burn', async (c) => {
+    if (!deps?.triggerBurn) return c.json({ error: 'burn trigger not available' }, 503);
+    const body = await readJson(c);
+    if (!body) return c.json({ error: 'invalid JSON body' }, 400);
+    let taskId: string | undefined;
+    if (body.taskId !== undefined && body.taskId !== null) {
+      if (!validId(body.taskId)) return c.json({ error: 'invalid taskId' }, 400);
+      taskId = body.taskId;
+    }
+    let provider: Provider | undefined;
+    if (body.provider !== undefined && body.provider !== null) {
+      if (!isProvider(body.provider)) return c.json({ error: 'invalid provider' }, 400);
+      provider = body.provider;
+    }
+    try {
+      const result = await deps.triggerBurn(taskId, provider);
+      return c.json({ ok: true, result: result ?? null });
+    } catch (e) {
+      return c.json({ ok: false, error: errMsg(e) }, 500);
+    }
+  });
+
+  // --- SSE -----------------------------------------------------------------
+
+  const sseAborts = new Set<() => void>();
+  const HISTORY_DEFAULT = 200;
+  const POLL_BATCH = 500;
+
+  app.get('/api/events', (c) => {
+    const afterRaw = c.req.query('after') ?? c.req.header('Last-Event-ID');
+    let after: number | null = null;
+    if (afterRaw !== undefined && afterRaw !== '') {
+      const n = Number.parseInt(afterRaw, 10);
+      if (!Number.isFinite(n) || n < 0) return c.json({ error: 'invalid after id' }, 400);
+      after = n;
+    }
+    return streamSSE(c, async (stream) => {
+      let stopped = false;
+      const stop = () => {
+        stopped = true;
+      };
+      stream.onAbort(stop);
+      sseAborts.add(stop);
+      try {
+        const history =
+          after !== null ? db.eventsAfter(after, POLL_BATCH) : db.lastEvents(HISTORY_DEFAULT);
+        let last = after ?? 0;
+        const writeEv = async (row: TaskEventRow) => {
+          await stream.writeSSE({ event: 'ev', id: String(row.id), data: JSON.stringify(row) });
+          if (row.id > last) last = row.id;
+        };
+        for (const row of history) {
+          if (stopped) return;
+          await writeEv(row);
+        }
+        const writeState = async () => {
+          await stream.writeSSE({ event: 'state', data: JSON.stringify(await buildState()) });
+        };
+        await writeState();
+        let nextStateAt = Date.now() + 15_000;
+        while (!stopped && !stream.aborted && !stream.closed) {
+          await stream.sleep(1_000);
+          if (stopped || stream.aborted || stream.closed) break;
+          for (const row of db.eventsAfter(last, POLL_BATCH)) {
+            if (stopped) return;
+            await writeEv(row);
+          }
+          if (Date.now() >= nextStateAt) {
+            await writeState();
+            nextStateAt = Date.now() + 15_000;
+          }
+        }
+      } finally {
+        sseAborts.delete(stop);
+      }
+    });
+  });
+
+  // --- static board (board/dist) ---------------------------------------------
+
+  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+  const distDir = path.resolve(moduleDir, '..', 'board', 'dist');
+  if (existsSync(distDir)) {
+    // @hono/node-server serveStatic resolves root relative to cwd.
+    const relRoot = path.relative(process.cwd(), distDir) || '.';
+    app.get('*', serveStatic({ root: relRoot }));
+    const spa = serveStatic({ root: relRoot, path: 'index.html' });
+    app.get('*', (c, next) => (c.req.path.startsWith('/api') ? next() : spa(c, next)));
+  } else {
+    app.get('*', (c) => {
+      if (c.req.path.startsWith('/api')) return c.notFound();
+      return c.text('surplus board not built — run: cd board && pnpm install && pnpm build', 503);
+    });
+  }
+
+  app.notFound((c) => c.json({ error: 'not found' }, 404));
+
+  // --- listen (127.0.0.1 ONLY) -------------------------------------------------
+
+  let server: ServerType;
+  await new Promise<void>((resolve) => {
+    server = serve({ fetch: app.fetch, port: opts.port, hostname: '127.0.0.1' }, () => resolve());
+  });
+
+  opts.signal?.addEventListener(
+    'abort',
+    () => {
+      for (const stop of [...sseAborts]) stop();
+      const s = server as ServerType & { closeAllConnections?: () => void };
+      s.closeAllConnections?.();
+      server.close();
+    },
+    { once: true },
+  );
+}

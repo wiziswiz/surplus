@@ -1,0 +1,94 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Instrument Sans", ui-sans-serif, system-ui, sans-serif;
+
+  /* Warm-tinted dark surfaces — depth via color layering, not shadow */
+  --color-base: oklch(0.16 0.012 60);
+  --color-raised: oklch(0.19 0.014 60);
+  --color-overlay: oklch(0.22 0.016 60);
+  --color-line: oklch(0.28 0.018 60);
+
+  --color-ink: oklch(0.93 0.012 75);
+  --color-dim: oklch(0.67 0.016 65);
+  --color-faint: oklch(0.48 0.014 60);
+
+  /* Warm amber/copper primary + burn; teal-green secondary */
+  --color-ember: oklch(0.78 0.145 70);
+  --color-copper: oklch(0.65 0.125 50);
+  --color-burn: oklch(0.6 0.19 35);
+  --color-jade: oklch(0.76 0.115 175);
+  --color-danger: oklch(0.6 0.2 27);
+
+  --radius-card: 10px;
+  --radius-chip: 4px;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  background: var(--color-base);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  font-variant-numeric: tabular-nums; /* inherits: ALL numbers tabular */
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-overlay);
+  border-radius: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Animated gradient underglow for the burning banner */
+@keyframes burn-slide {
+  to {
+    background-position: -200% 0;
+  }
+}
+.burn-banner {
+  position: relative;
+  isolation: isolate;
+}
+.burn-banner::after {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  border-radius: inherit;
+  background: linear-gradient(
+    100deg,
+    oklch(0.6 0.19 35 / 0.55),
+    oklch(0.78 0.145 70 / 0.55),
+    oklch(0.6 0.19 35 / 0.55)
+  );
+  background-size: 200% 100%;
+  animation: burn-slide 2.6s linear infinite;
+  filter: blur(8px);
+  z-index: -1;
+}
+
+/* Running-card pulse */
+@keyframes run-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 oklch(0.78 0.145 70 / 0.28);
+  }
+  70% {
+    box-shadow: 0 0 0 6px oklch(0.78 0.145 70 / 0);
+  }
+}
+.run-pulse {
+  animation: run-pulse 2.2s ease-out infinite;
+}
+
+.gauge-fill {
+  transition: width 700ms cubic-bezier(0.3, 0, 0, 1);
+}

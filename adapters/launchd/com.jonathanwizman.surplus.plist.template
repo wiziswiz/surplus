@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  surplus launchd job — TEMPLATE.
+
+  `surplus install` (src/install.ts) renders this file by replacing the
+  placeholders below, writes the result to
+  ~/Library/LaunchAgents/com.jonathanwizman.surplus.plist, and loads it.
+  You only need to touch this file for a manual install (see README.md
+  in this directory).
+
+  Placeholders:
+    __NODE__         absolute path to the node binary
+                     (e.g. /opt/homebrew/bin/node — find yours with `which node`)
+    __SURPLUS_BIN__  absolute path to bin/surplus.js in your clone of this repo
+    __INTERVAL__     seconds between ticks (default 900 = 15 minutes)
+    __LOG__          absolute path to the launchd log file
+                     (default ~/.surplus/logs/launchd.log, expanded — launchd
+                     does not understand `~`)
+
+  Notes:
+    - launchd does not run a shell: ProgramArguments are exec'd directly,
+      so every path must be absolute and there is no $PATH expansion.
+    - StartInterval ticks are skipped while the Mac sleeps; missed intervals
+      coalesce into a single run on wake. That is fine — `surplus tick` is
+      idempotent and decides from current usage, not from how many ticks fired.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jonathanwizman.surplus</string>
+
+  <!-- node + the surplus entrypoint + the `tick` subcommand. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE__</string>
+    <string>__SURPLUS_BIN__</string>
+    <string>tick</string>
+  </array>
+
+  <!-- Fire every __INTERVAL__ seconds (default 900). -->
+  <key>StartInterval</key>
+  <integer>__INTERVAL__</integer>
+
+  <!-- Do not fire immediately at load/login; wait for the first interval. -->
+  <key>RunAtLoad</key>
+  <false/>
+
+  <!-- stdout and stderr both append to the surplus log dir.
+       Tokens are never written to logs (errors are redacted upstream). -->
+  <key>StandardOutPath</key>
+  <string>__LOG__</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG__</string>
+</dict>
+</plist>
