@@ -11,11 +11,11 @@ Ticks are cheap and idempotent; almost all of them exit immediately with
 node bin/surplus.js install
 ```
 
-This renders [`com.jonathanwizman.surplus.plist.template`](./com.jonathanwizman.surplus.plist.template)
+This renders [`com.surplus.tick.plist.template`](./com.surplus.tick.plist.template)
 with your real paths (node binary, `bin/surplus.js`, log file), writes it to:
 
 ```
-~/Library/LaunchAgents/com.jonathanwizman.surplus.plist
+~/Library/LaunchAgents/com.surplus.tick.plist
 ```
 
 and loads it. Defaults: tick every 900 s, no run at load, logs to
@@ -32,8 +32,8 @@ If you prefer to do it yourself (or `surplus install` is unavailable):
        -e "s|__SURPLUS_BIN__|$HOME/Projects/surplus/bin/surplus.js|" \
        -e "s|__INTERVAL__|900|" \
        -e "s|__LOG__|$HOME/.surplus/logs/launchd.log|g" \
-       adapters/launchd/com.jonathanwizman.surplus.plist.template \
-       > ~/Library/LaunchAgents/com.jonathanwizman.surplus.plist
+       adapters/launchd/com.surplus.tick.plist.template \
+       > ~/Library/LaunchAgents/com.surplus.tick.plist
    ```
 
    Adjust `__SURPLUS_BIN__` to wherever you cloned the repo. launchd does not
@@ -49,10 +49,10 @@ If you prefer to do it yourself (or `surplus install` is unavailable):
 3. Load the agent:
 
    ```sh
-   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jonathanwizman.surplus.plist
+   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.surplus.tick.plist
    ```
 
-   (On older macOS: `launchctl load -w ~/Library/LaunchAgents/com.jonathanwizman.surplus.plist`.)
+   (On older macOS: `launchctl load -w ~/Library/LaunchAgents/com.surplus.tick.plist`.)
 
 ## Verify
 
@@ -60,14 +60,14 @@ If you prefer to do it yourself (or `surplus install` is unavailable):
 launchctl list | grep surplus
 ```
 
-You should see a line containing `com.jonathanwizman.surplus`. The first
+You should see a line containing `com.surplus.tick`. The first
 column is the PID of the last run (`-` when not currently running), the
 second is the last exit status.
 
 Force a tick now instead of waiting for the interval:
 
 ```sh
-launchctl kickstart gui/$(id -u)/com.jonathanwizman.surplus
+launchctl kickstart gui/$(id -u)/com.surplus.tick
 ```
 
 Then watch the log:
@@ -88,8 +88,8 @@ node bin/surplus.js uninstall
 Or manually:
 
 ```sh
-launchctl bootout gui/$(id -u)/com.jonathanwizman.surplus
-rm ~/Library/LaunchAgents/com.jonathanwizman.surplus.plist
+launchctl bootout gui/$(id -u)/com.surplus.tick
+rm ~/Library/LaunchAgents/com.surplus.tick.plist
 ```
 
 (On older macOS: `launchctl unload -w ...` before removing the file.)

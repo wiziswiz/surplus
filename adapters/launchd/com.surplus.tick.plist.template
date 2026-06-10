@@ -5,7 +5,7 @@
 
   `surplus install` (src/install.ts) renders this file by replacing the
   placeholders below, writes the result to
-  ~/Library/LaunchAgents/com.jonathanwizman.surplus.plist, and loads it.
+  ~/Library/LaunchAgents/com.surplus.tick.plist, and loads it.
   You only need to touch this file for a manual install (see README.md
   in this directory).
 
@@ -28,7 +28,7 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.jonathanwizman.surplus</string>
+  <string>com.surplus.tick</string>
 
   <!-- node + the surplus entrypoint + the `tick` subcommand. -->
   <key>ProgramArguments</key>

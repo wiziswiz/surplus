@@ -1,14 +1,14 @@
 # surplus
 
-Burn your expiring AI-subscription quota on your backlog, automatically.
+**Your Claude/ChatGPT subscription quota resets every week — whatever you
+didn't use is gone. surplus spends those expiring tokens on your backlog
+while you sleep.**
 
-Claude Pro/Max and ChatGPT (Codex CLI) subscriptions meter usage in two
-windows: a rolling 5-hour window and a 7-day window. Whatever is left of the
-weekly window at reset evaporates. surplus is a local macOS tool that watches
-those windows and, in the hours before each provider's weekly reset, spends
-the quota you were about to lose on real work: queued tasks against your own
-projects, executed in isolated git worktrees, scored by an LLM judge, and
-tracked on a local kanban board.
+It's a local macOS tool: a kanban board of tasks for your own projects, a
+watcher that knows when each provider's weekly reset is coming, and a
+dispatcher that — in the final hours before reset — runs autonomous Claude
+Code / Codex sessions in isolated git worktrees, has an LLM judge score the
+work against your project's VISION, and leaves reviewed-ready branches behind.
 
 ## What & why
 

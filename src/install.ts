@@ -1,7 +1,7 @@
 /**
  * surplus — launchd agent install/uninstall.
  *
- * Writes ~/Library/LaunchAgents/com.jonathanwizman.surplus.plist which runs
+ * Writes ~/Library/LaunchAgents/com.surplus.tick.plist which runs
  * `node <repo>/bin/surplus.js tick` every StartInterval seconds, logging to
  * ~/.surplus/logs/launchd.log.
  */
@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 
 import { LOGS_DIR, SURPLUS_DIR_NAME } from './types.js';
 
-export const LAUNCHD_LABEL = 'com.jonathanwizman.surplus';
+export const LAUNCHD_LABEL = 'com.surplus.tick';
 
 function launchAgentsDir(): string {
   return join(homedir(), 'Library', 'LaunchAgents');
