@@ -140,6 +140,11 @@ export interface SurplusConfig {
     /** Suggested turn bound embedded in the /goal condition. Default 40. */
     maxTurnsHint: number;
   };
+  /** Project discovery for the board's Add-Project picker. */
+  discovery: {
+    /** Directories scanned (one level deep) for git repos. '~' expands. Default ['~/Projects']. */
+    roots: string[];
+  };
   /** Judge always runs on claude (cheap + reliable JSON). */
   judge: {
     model: ModelChoice;
@@ -337,6 +342,21 @@ export interface Vision {
 //   POST /api/burn                   → body {taskId?: string, provider?: Provider} → manual one-shot dispatch (ignores windows, respects pacing)
 //   GET  /api/events?after=<id>      → SSE stream of TaskEventRow (named event: 'ev') + periodic 'state' frames (ApiState)
 //
+/** One repo found by the discovery scanner (GET /api/discover). */
+export interface DiscoveredRepo {
+  name: string;
+  path: string;
+  branch: string | null;
+  /** Last commit time, ms epoch; null for repos with no commits. */
+  lastCommitAt: number | null;
+  /** Uncommitted changes present. */
+  dirty: boolean;
+  /** Already registered as a surplus project. */
+  registered: boolean;
+  /** Recently opened in Claude Code (~/.claude/projects mtime within 30 days). */
+  claudeRecent: boolean;
+}
+
 export interface ApiState {
   /** Per-provider snapshots; key absent when the provider is disabled. */
   usage: Partial<Record<Provider, UsageSnapshot | null>>;

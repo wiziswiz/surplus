@@ -25,6 +25,7 @@ function makeConfig(maxTurnsHint = 40): SurplusConfig {
     },
     pacing: { fiveHourPausePct: 90 },
     reserve: { weeklyPct: 10, fiveHourPct: 25, watchdogIntervalMinutes: 5 },
+    discovery: { roots: ['~/Projects'] },
     dispatcher: { maxConcurrent: 1, maxAttempts: 3, taskTimeoutMinutes: 90, maxTurnsHint },
     judge: { model: 'haiku' },
     board: { port: 4321 },

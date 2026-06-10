@@ -54,6 +54,7 @@ export interface ConfigDto {
     taskTimeoutMinutes: number;
     maxTurnsHint: number;
   };
+  discovery: { roots: string[] };
   judge: { model: string };
   board: { port: number };
   judgePassScore: number;
@@ -83,6 +84,7 @@ export interface ConfigPatchDto {
     taskTimeoutMinutes?: number;
     maxTurnsHint?: number;
   };
+  discovery?: { roots?: string[] };
   judge?: { model?: string };
   board?: { port?: number };
   judgePassScore?: number;
@@ -105,6 +107,17 @@ export interface ProjectDto {
   model: string | null;
   effort: string | null;
   createdAt: number;
+}
+
+/** GET /api/discover — local git repos found under config.discovery.roots. */
+export interface DiscoveredRepoDto {
+  name: string;
+  path: string;
+  branch: string | null;
+  lastCommitAt: number | null;
+  dirty: boolean;
+  registered: boolean;
+  claudeRecent: boolean;
 }
 
 export interface TaskDto {

@@ -1,6 +1,7 @@
 import type {
   ConfigDto,
   ConfigPatchDto,
+  DiscoveredRepoDto,
   ProjectDto,
   Provider,
   StateDto,
@@ -41,6 +42,8 @@ export const createTask = (body: { projectId: string; title: string; status?: Ta
 
 export const createProject = (body: { path: string } | { name: string }) =>
   api<ProjectDto>('/api/projects', { method: 'POST', body: JSON.stringify(body) });
+
+export const getDiscover = () => api<DiscoveredRepoDto[]>('/api/discover');
 
 /** Mirrors the dispatcher's DispatchResult (returned in the burn response). */
 export interface BurnResultDto {

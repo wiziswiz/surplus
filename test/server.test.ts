@@ -86,6 +86,7 @@ function makeConfig(): SurplusConfig {
     },
     pacing: { fiveHourPausePct: 90 },
     reserve: { weeklyPct: 10, fiveHourPct: 25, watchdogIntervalMinutes: 5 },
+    discovery: { roots: ['~/Projects'] },
     dispatcher: { maxConcurrent: 1, maxAttempts: 3, taskTimeoutMinutes: 90, maxTurnsHint: 40 },
     judge: { model: 'sonnet' },
     board: { port: 4242 },

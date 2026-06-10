@@ -33,6 +33,8 @@ interface Draft {
   codexWeeklyResetFallback: string;
   judgeModel: string;
   judgePassScore: string;
+  /** Comma-separated representation of config.discovery.roots. */
+  discoveryRoots: string;
 }
 
 type NumKey =
@@ -90,7 +92,18 @@ function fromConfig(c: ConfigDto): Draft {
     codexWeeklyResetFallback: c.providers.codex.weeklyResetFallback ?? '',
     judgeModel: c.judge.model,
     judgePassScore: String(c.judgePassScore),
+    discoveryRoots: c.discovery.roots.join(', '),
   };
+}
+
+/** Parse the comma-separated roots draft; empty input falls back to the default. */
+export function parseDiscoveryRoots(raw: string): string[] {
+  const roots = raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .slice(0, 20);
+  return roots.length > 0 ? roots : ['~/Projects'];
 }
 
 function validateNum(key: NumKey, raw: string): string | null {
@@ -137,6 +150,7 @@ function buildPatch(d: Draft): ConfigPatchDto {
     },
     judge: { model: d.judgeModel },
     judgePassScore: Number(d.judgePassScore),
+    discovery: { roots: parseDiscoveryRoots(d.discoveryRoots) },
   };
 }
 
@@ -408,6 +422,30 @@ export function SettingsPanel({
 
             <Section title="Pacing">
               {num('fiveHourPausePct', '5-hour pause at', '%', 'Between launches, wait for the 5-hour reset once utilization hits this.')}
+            </Section>
+
+            <Section title="Discovery">
+              <div className="flex flex-col gap-1">
+                <label htmlFor="set-discoveryRoots" className="text-sm font-medium text-ink">
+                  Scan folders
+                </label>
+                <input
+                  id="set-discoveryRoots"
+                  type="text"
+                  value={draft.discoveryRoots}
+                  onChange={(e) => set('discoveryRoots', e.target.value)}
+                  placeholder="~/Projects, ~/Code"
+                  aria-describedby="set-discoveryRoots-help"
+                  className="field-input w-full max-w-80"
+                />
+                <p
+                  id="set-discoveryRoots-help"
+                  className="max-w-xs text-xs leading-relaxed text-faint"
+                >
+                  Comma-separated folders the Add-Project picker scans for git repos. ~ is your
+                  home folder.
+                </p>
+              </div>
             </Section>
 
             <Section title="Dispatcher">

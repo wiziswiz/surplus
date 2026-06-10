@@ -96,6 +96,9 @@ export function defaultConfig(): SurplusConfig {
       fiveHourPct: 25,
       watchdogIntervalMinutes: 5,
     },
+    discovery: {
+      roots: ['~/Projects'],
+    },
     dispatcher: {
       maxConcurrent: 1,
       maxAttempts: 3,

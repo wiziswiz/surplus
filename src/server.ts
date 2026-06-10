@@ -35,6 +35,7 @@ import type {
   TaskStatus,
   UsageSnapshot,
 } from './types.js';
+import { discoverRepos } from './discover.js';
 
 // ---------------------------------------------------------------------------
 // Structural db interface (subset of db.ts the server needs)
@@ -235,6 +236,7 @@ export interface ConfigPatch {
     taskTimeoutMinutes?: number;
     maxTurnsHint?: number;
   };
+  discovery?: { roots?: string[] };
   judge?: { model?: string };
   board?: { port?: number };
   judgePassScore?: number;
@@ -270,6 +272,12 @@ const wantResetFallback: FieldCheck = (v, p) =>
   v === null || (typeof v === 'string' && v.trim().length > 0)
     ? null
     : `${p} must be a non-empty string or null`;
+const wantStrArray: FieldCheck = (v, p) =>
+  Array.isArray(v) &&
+  v.length <= 20 &&
+  v.every((x) => typeof x === 'string' && x.trim().length > 0)
+    ? null
+    : `${p} must be an array of up to 20 non-empty strings`;
 
 const PROVIDER_SPEC: SpecNode = {
   enabled: wantBool,
@@ -290,6 +298,7 @@ const CONFIG_SPEC: SpecNode = {
     taskTimeoutMinutes: wantPosInt,
     maxTurnsHint: wantPosInt,
   },
+  discovery: { roots: wantStrArray },
   judge: { model: wantStr },
   board: { port: wantPort },
   judgePassScore: wantScore,
@@ -433,6 +442,14 @@ export async function startServer(opts: StartServerOptions): Promise<void> {
   // --- projects ---------------------------------------------------------------
 
   app.get('/api/projects', (c) => c.json(db.listProjects()));
+
+  // Local git-repo discovery for the Add-Project picker (localhost-only
+  // server; scans config.discovery.roots one level deep, never leaves the
+  // machine, returns no file contents — just repo names/paths/recency).
+  app.get('/api/discover', (c) => {
+    const registeredPaths = new Set(db.listProjects().map((p) => p.path));
+    return c.json(discoverRepos({ roots: config.discovery.roots, registeredPaths }));
+  });
 
   app.post('/api/projects', async (c) => {
     const body = await readJson(c);
