@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { createProject, getDiscover } from '../api';
+import { createProject, getDiscover, ServerUnreachableError } from '../api';
 import type { DiscoveredRepoDto } from '../types';
 import { fmtRel } from '../lib';
 import { trapTab } from './SlideOver';
@@ -24,7 +24,7 @@ export function AddProjectModal({
   const [busyPath, setBusyPath] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [repos, setRepos] = useState<DiscoveredRepoDto[] | null>(null);
-  const [discoverErr, setDiscoverErr] = useState(false);
+  const [discoverErr, setDiscoverErr] = useState<'none' | 'server-gone' | 'failed'>('none');
   const [query, setQuery] = useState('');
   const panelRef = useRef<HTMLDivElement>(null);
 
@@ -44,8 +44,8 @@ export function AddProjectModal({
   useEffect(() => {
     getDiscover()
       .then(setRepos)
-      .catch(() => {
-        setDiscoverErr(true);
+      .catch((e: unknown) => {
+        setDiscoverErr(e instanceof ServerUnreachableError ? 'server-gone' : 'failed');
         setRepos([]);
       });
   }, []);
@@ -151,11 +151,13 @@ export function AddProjectModal({
               )}
               {repos !== null && filtered.length === 0 && (
                 <p className="px-3 py-4 text-xs leading-relaxed text-faint">
-                  {discoverErr
-                    ? 'Discovery failed — use the “Paste a path” tab.'
-                    : query.trim() !== ''
-                      ? 'No repos match that search.'
-                      : 'No git repos found under your scan roots (Settings → Discovery). Use “New project” or “Paste a path”.'}
+                  {discoverErr === 'server-gone'
+                    ? 'Can’t reach surplus — the server stopped. Run `surplus board` in Terminal, then refresh this page.'
+                    : discoverErr === 'failed'
+                      ? 'Discovery failed — use the “Paste a path” tab, or check the scan folders in Settings → Discovery.'
+                      : query.trim() !== ''
+                        ? 'No repos match that search.'
+                        : 'No git repos found under your scan roots (Settings → Discovery). Use “New project” or “Paste a path”.'}
                 </p>
               )}
               {filtered.map((r) => (

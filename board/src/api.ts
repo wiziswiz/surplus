@@ -10,11 +10,25 @@ import type {
   TaskStatus,
 } from './types';
 
+/** Thrown when the surplus server itself is unreachable (process stopped). */
+export class ServerUnreachableError extends Error {
+  constructor() {
+    super('Can’t reach surplus — is `surplus board` running?');
+    this.name = 'ServerUnreachableError';
+  }
+}
+
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
-    headers: { 'content-type': 'application/json' },
-    ...init,
-  });
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      headers: { 'content-type': 'application/json' },
+      ...init,
+    });
+  } catch {
+    // fetch rejects (TypeError) only on network failure — server is gone.
+    throw new ServerUnreachableError();
+  }
   if (!res.ok) {
     let msg = `HTTP ${res.status}`;
     try {

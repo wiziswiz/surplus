@@ -27,6 +27,8 @@ export default function App() {
   const [scores, setScores] = useState<Record<string, number>>({});
   const [drawerId, setDrawerId] = useState<string | null>(null);
   const [drawerVersion, setDrawerVersion] = useState(0);
+  const [connected, setConnected] = useState(true);
+  const disconnectTimer = useRef<number | null>(null);
   const [showAddProject, setShowAddProject] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
 
@@ -148,8 +150,28 @@ export default function App() {
     };
     es.addEventListener('ev', onEv);
     es.addEventListener('state', onState);
-    return () => es.close();
-  }, [refetchTasks]);
+    // Connection health: EventSource auto-reconnects; debounce the banner so
+    // a single blip doesn't flash it. onopen clears it immediately.
+    es.onopen = () => {
+      if (disconnectTimer.current !== null) {
+        window.clearTimeout(disconnectTimer.current);
+        disconnectTimer.current = null;
+      }
+      setConnected(true);
+      void refreshAll(); // resync after an outage
+    };
+    es.onerror = () => {
+      if (disconnectTimer.current !== null) return;
+      disconnectTimer.current = window.setTimeout(() => {
+        disconnectTimer.current = null;
+        setConnected(false);
+      }, 3000);
+    };
+    return () => {
+      if (disconnectTimer.current !== null) window.clearTimeout(disconnectTimer.current);
+      es.close();
+    };
+  }, [refetchTasks, refreshAll]);
 
   const togglePause = useCallback(async () => {
     const current = state?.paused ?? false;
@@ -195,6 +217,16 @@ export default function App() {
         onRefreshUsage={() => void refreshUsage()}
         refreshState={refreshState}
       />
+      {!connected && (
+        <div
+          role="alert"
+          className="shrink-0 border-b border-danger/30 bg-danger/10 px-6 py-2 text-xs text-danger"
+        >
+          Can&rsquo;t reach surplus — the server may have stopped. Run{' '}
+          <code className="rounded-chip bg-overlay px-1.5 py-0.5">surplus board</code> in
+          Terminal; this page will reconnect automatically.
+        </div>
+      )}
       <Board
         tasks={tasks}
         projects={projects}

@@ -10,6 +10,93 @@ dispatcher that — in the final hours before reset — runs autonomous Claude
 Code / Codex sessions in isolated git worktrees, has an LLM judge score the
 work against your project's VISION, and leaves reviewed-ready branches behind.
 
+## Get started in 4 steps
+
+You don't need to be a programmer. If you have a Claude subscription and can
+copy-paste three commands, you can use this.
+
+**Before you start, you need** (one-time, ~5 minutes):
+
+- a Mac
+- [Claude Code](https://claude.com/claude-code) installed and logged in with
+  your Pro/Max account (if typing `claude` in Terminal opens a chat, you're
+  set)
+- [Node.js](https://nodejs.org) 20+ and pnpm (`npm install -g pnpm`)
+
+### 1 · Install
+
+Copy-paste into Terminal:
+
+```sh
+git clone https://github.com/wiziswiz/surplus.git && cd surplus
+pnpm install && pnpm build:all
+npm link    # makes the `surplus` command available everywhere
+```
+
+### 2 · Open the board and pick a project
+
+```sh
+surplus board
+```
+
+Your dashboard is now at [http://localhost:4242](http://localhost:4242):
+
+<img src="docs/board.png" alt="The surplus kanban board: usage gauges with reset countdowns on top, task columns below" width="800">
+
+Click **+ Project**. surplus scans your `~/Projects` folder and shows your
+repos sorted by recent activity — projects you've recently opened in Claude
+Code get a `recent` badge. **Click one. That's it** — no paths to find, no
+typing. (Keep your code somewhere else? Add scan folders in Settings →
+Discovery, or use the "Paste a path" tab. No projects at all? "New project"
+creates one from scratch.)
+
+Picking a project auto-drafts a `VISION.md` — a plain-English description of
+what "finished" looks like for that project. Worth a read and an edit: it's
+the contract your overnight workers are graded against.
+
+### 3 · Queue some work
+
+Click **+ Add task** in the Ready column and describe what you want done, in
+plain English, like you'd brief a contractor: *"Add CSV export to the reports
+page. It should export the currently filtered rows with correct headers."*
+
+### 4 · Arm the schedule
+
+```sh
+surplus install
+```
+
+Done. surplus now checks your usage every 15 minutes and does **nothing**
+until the final hours before your weekly reset — the window where unused
+quota is about to evaporate anyway. Then it works through your queue:
+each task runs in its own git branch, an independent LLM judge scores the
+result against your VISION (pass = done, fail = retry with feedback), and
+you wake up to cards in Done with reviewed-ready branches:
+
+<img src="docs/done-card.png" alt="A finished task card: project chip, model badge, attempt dots, judge score" width="800">
+
+Everything is tunable from the Settings panel — burn windows, safety
+reserves for your other tools, models, budgets:
+
+<img src="docs/settings.png" alt="The settings panel: burn modes, reserve, and provider configuration" width="420">
+
+<details>
+<summary><b>Prefer the terminal?</b> Every board action has a CLI equivalent.</summary>
+
+```sh
+surplus add ~/Projects/my-backlog-app      # register a project
+surplus task create my-backlog-app "Add CSV export to reports" \
+  --body "Export currently filtered rows. Acceptance: file opens with correct headers."
+surplus status                             # usage windows + decision per provider
+surplus burn --force                       # force one task through right now
+surplus pause                              # kill switch
+```
+
+Nothing runs until a burn window opens. `burn --force` ignores the windows
+but still respects pacing and the kill switch.
+
+</details>
+
 ## What & why
 
 The idea went viral as a cron job (@aaronjmars's tweet and his `aeon` repo):
@@ -113,34 +200,6 @@ Projects and tasks carry a provider affinity — `claude`, `codex`, or `any`
 (the default). When a burn window opens for a provider, the dispatcher only
 claims tasks whose affinity matches. `any` tasks go to whichever provider is
 burning, so a single backlog drains both subscriptions.
-
-## Quickstart
-
-```sh
-pnpm install
-pnpm build:all
-
-# register a project (must be a git repo); creates VISION.md from the template
-node bin/surplus.js add ~/Projects/my-backlog-app
-
-# edit ~/Projects/my-backlog-app/VISION.md — see "Writing VISION.md" below
-
-# queue work
-node bin/surplus.js task create my-backlog-app "Add CSV export to reports" \
-  --body "Export currently filtered rows. Acceptance: file opens with correct headers."
-
-# install the launchd agent (tick every 15 min)
-node bin/surplus.js install
-
-# watch it
-node bin/surplus.js board     # local kanban at http://localhost:<board.port>
-node bin/surplus.js status    # usage windows + current decision per provider
-```
-
-Nothing runs until a burn window opens. To force one task through right now
-(ignores windows, still respects pacing and the kill switch):
-`node bin/surplus.js burn --force`. Without `--force` (or `--provider`),
-`burn` still respects the burn windows.
 
 ## The usage-endpoint gotcha
 
