@@ -26,7 +26,7 @@ import type {
   Vision,
 } from './types.js';
 
-import { loadConfig, ensureDirs, isPaused, setPaused, configPath } from './config.js';
+import { loadConfig, saveConfig, ensureDirs, isPaused, setPaused, configPath } from './config.js';
 import { decide } from './decide.js';
 import { openDb } from './db.js';
 import type { SurplusDb, TaskPatch } from './db.js';
@@ -36,8 +36,8 @@ import { claudeAdapter } from './providers/claude.js';
 import { codexAdapter } from './providers/codex.js';
 import { parseVision, draftVision, scaffoldProject as scaffoldProjectDir } from './vision.js';
 import { judgeRun } from './judge.js';
-import { startServer } from './server.js';
-import type { ServerDb } from './server.js';
+import { startServer, applyConfigPatch } from './server.js';
+import type { ServerDb, ConfigPatch } from './server.js';
 import { installLaunchd, uninstallLaunchd } from './install.js';
 
 const VERSION = '0.1.0';
@@ -493,8 +493,13 @@ program
   .description('Register an existing git repo as a surplus project')
   .option('--name <name>', 'project name (default: directory basename)')
   .addOption(providerPrefOption('default provider affinity for this project'))
+  .option('--model <model>', 'per-project model override (stored on the project row)')
+  .option('--effort <effort>', 'per-project effort override (stored on the project row)')
   .action(
-    wrap(async (pathArg: string, opts: { name?: string; provider: ProviderPref }) => {
+    wrap(async (
+      pathArg: string,
+      opts: { name?: string; provider: ProviderPref; model?: string; effort?: string },
+    ) => {
       const projPath = resolve(pathArg);
       if (!existsSync(projPath) || !statSync(projPath).isDirectory()) {
         throw new Error(`not a directory: ${projPath}`);
@@ -519,8 +524,8 @@ program
         path: projPath,
         visionPath,
         provider: opts.provider,
-        model: null,
-        effort: null,
+        model: opts.model ?? null,
+        effort: opts.effort ?? null,
       });
       console.log(`Added project ${project.id} → ${project.path}`);
       if (drafted) {
@@ -536,8 +541,10 @@ program
   .command('new <name>')
   .description('Scaffold a fresh project under ~/Projects/<slug> and register it')
   .addOption(providerPrefOption('default provider affinity for this project'))
+  .option('--model <model>', 'per-project model override (stored on the project row)')
+  .option('--effort <effort>', 'per-project effort override (stored on the project row)')
   .action(
-    wrap(async (name: string, opts: { provider: ProviderPref }) => {
+    wrap(async (name: string, opts: { provider: ProviderPref; model?: string; effort?: string }) => {
       const deps = buildDeps();
       const slug = slugify(name);
       const dir = join(homedir(), 'Projects', slug);
@@ -560,8 +567,8 @@ program
         path: dir,
         visionPath,
         provider: opts.provider,
-        model: null,
-        effort: null,
+        model: opts.model ?? null,
+        effort: opts.effort ?? null,
       });
       console.log(`Added project ${project.id} → ${project.path}`);
       console.log(`${drafted ? 'Drafted' : 'Review'} ${visionPath} — edit it before burning.`);
@@ -749,6 +756,11 @@ program
             });
           },
           triggerBurn,
+          updateConfig: (patch: ConfigPatch) => {
+            const next = applyConfigPatch(loadConfig(), patch);
+            saveConfig(next);
+            return next;
+          },
         },
       });
     }),

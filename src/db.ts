@@ -131,9 +131,20 @@ export interface SurplusDb {
    * doesn't match (task 'any' matches all), tasks scheduled in the future,
    * tasks whose parent isn't done, and any task in a project that already has
    * a 'running' task. Sets status='running' and increments attempts in one
-   * transaction. Returns the updated row or null.
+   * BEGIN IMMEDIATE transaction (concurrent processes wait on the busy
+   * timeout instead of throwing SQLITE_BUSY_SNAPSHOT). When `maxConcurrent`
+   * is given, the claim also refuses atomically once that many tasks are
+   * 'running' globally. Returns the updated row or null.
    */
-  claimNextReadyTask(now: number, provider: Provider): TaskRow | null;
+  claimNextReadyTask(now: number, provider: Provider, maxConcurrent?: number): TaskRow | null;
+
+  /**
+   * Atomically claim a SPECIFIC task for a manual one-shot burn: a single
+   * status-guarded UPDATE (status='ready' + provider-compatible), so a
+   * concurrent tick in another process can never double-claim it. Returns
+   * the updated row, or null when the guard failed.
+   */
+  claimTaskById(id: string, now: number, provider: Provider): TaskRow | null;
 
   createRun(input: CreateRunInput): TaskRunRow;
   updateRun(id: string, patch: RunPatch): TaskRunRow;
@@ -477,11 +488,19 @@ export function openDb(dbFilePath?: string): SurplusDb {
             OR EXISTS (SELECT 1 FROM tasks p WHERE p.id = t.parent_id AND p.status = 'done'))
        AND NOT EXISTS (SELECT 1 FROM tasks r
                        WHERE r.project_id = t.project_id AND r.status = 'running')
+       AND (@maxConcurrent IS NULL
+            OR (SELECT COUNT(*) FROM tasks g WHERE g.status = 'running') < @maxConcurrent)
      ORDER BY t.priority ASC, t.created_at ASC, t.id ASC
      LIMIT 1`,
   );
   const updateClaim = db.prepare(
     `UPDATE tasks SET status = 'running', attempts = attempts + 1, updated_at = @now WHERE id = @id`,
+  );
+  // Forced claim: the status/provider guard lives in the UPDATE itself so the
+  // claim is atomic across processes (no read-then-write window).
+  const updateClaimById = db.prepare(
+    `UPDATE tasks SET status = 'running', attempts = attempts + 1, updated_at = @now
+     WHERE id = @id AND status = 'ready' AND (provider = @provider OR provider = 'any')`,
   );
 
   const countRunningStmt = db.prepare(
@@ -541,17 +560,37 @@ export function openDb(dbFilePath?: string): SurplusDb {
     }
   });
 
-  const claimTx = db.transaction((nowMs: number, provider: Provider): string | null => {
-    const row = selectClaimable.get({ provider, now: nowMs }) as { id: string } | undefined;
-    if (!row) return null;
-    updateClaim.run({ now: nowMs, id: row.id });
-    appendEvent('status-changed', row.id, {
+  // Invoked via .immediate(): BEGIN IMMEDIATE takes the write lock up front,
+  // so the SELECT sees the latest committed state and a concurrent claimer
+  // waits on the busy timeout instead of throwing SQLITE_BUSY_SNAPSHOT on
+  // the read→write upgrade (which would abort the whole tick).
+  const claimTx = db.transaction(
+    (nowMs: number, provider: Provider, maxConcurrent: number | null): string | null => {
+      const row = selectClaimable.get({ provider, now: nowMs, maxConcurrent }) as
+        | { id: string }
+        | undefined;
+      if (!row) return null;
+      updateClaim.run({ now: nowMs, id: row.id });
+      appendEvent('status-changed', row.id, {
+        from: 'ready',
+        to: 'running',
+        provider,
+        via: 'claim',
+      });
+      return row.id;
+    },
+  );
+
+  const claimByIdTx = db.transaction((id: string, nowMs: number, provider: Provider): boolean => {
+    const info = updateClaimById.run({ id, now: nowMs, provider });
+    if (info.changes !== 1) return false;
+    appendEvent('status-changed', id, {
       from: 'ready',
       to: 'running',
       provider,
-      via: 'claim',
+      via: 'forced-claim',
     });
-    return row.id;
+    return true;
   });
 
   // -- public API -----------------------------------------------------------------
@@ -640,9 +679,13 @@ export function openDb(dbFilePath?: string): SurplusDb {
       return (db.prepare(sql).all(...values) as TaskDbRow[]).map(mapTask);
     },
 
-    claimNextReadyTask(now: number, provider: Provider): TaskRow | null {
-      const id = claimTx(now, provider);
+    claimNextReadyTask(now: number, provider: Provider, maxConcurrent?: number): TaskRow | null {
+      const id = claimTx.immediate(now, provider, maxConcurrent ?? null);
       return id === null || id === undefined ? null : getTask(id);
+    },
+
+    claimTaskById(id: string, now: number, provider: Provider): TaskRow | null {
+      return claimByIdTx.immediate(id, now, provider) ? getTask(id) : null;
     },
 
     createRun(input: CreateRunInput): TaskRunRow {

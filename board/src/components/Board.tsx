@@ -11,6 +11,15 @@ const COLUMNS: { status: TaskStatus; label: string }[] = [
   { status: 'done', label: 'Done' },
 ];
 
+const EMPTY_HINT: Partial<Record<TaskStatus, string>> = {
+  triage: 'rough ideas land here',
+  todo: 'specified but not yet ready',
+  ready: 'the queue for the next burn window',
+  running: 'the dispatcher launches work here',
+  blocked: 'nothing needs a human right now',
+  done: 'judge-passed work shows up here',
+};
+
 export function Board({
   tasks,
   projects,
@@ -21,6 +30,7 @@ export function Board({
   onMove,
   onAddTask,
   onArchive,
+  onAddProject,
 }: {
   tasks: TaskDto[];
   projects: ProjectDto[];
@@ -31,9 +41,31 @@ export function Board({
   onMove: (id: string, status: TaskStatus) => void;
   onAddTask: (projectId: string, title: string, status: TaskStatus) => Promise<void>;
   onArchive: (id: string) => void;
+  onAddProject: () => void;
 }) {
+  // First-run: nothing registered yet — point at the one action that matters.
+  if (projects.length === 0) {
+    return (
+      <main className="flex min-h-0 flex-1 items-center justify-center p-8">
+        <div className="flex max-w-sm flex-col items-start gap-3 rounded-card bg-raised p-8 shadow-md">
+          <h2 className="text-xl font-semibold text-ink">No projects yet</h2>
+          <p className="text-sm leading-relaxed text-dim">
+            surplus burns leftover subscription quota on your backlog. Register a git repo — or
+            scaffold a fresh one — to give it something to build while you sleep.
+          </p>
+          <button
+            onClick={onAddProject}
+            className="mt-1 rounded-chip bg-ember/20 px-3.5 py-1.5 text-sm font-semibold text-ember transition-colors duration-150 hover:bg-ember/30"
+          >
+            + Add a project
+          </button>
+        </div>
+      </main>
+    );
+  }
+
   return (
-    <main className="flex min-h-0 flex-1 gap-5 overflow-x-auto px-5 py-5">
+    <main className="flex min-h-0 flex-1 gap-4 overflow-x-auto px-4 py-4">
       {COLUMNS.map((col) => (
         <Column
           key={col.status}
@@ -86,10 +118,11 @@ function Column({
   const droppable = !running; // dropping into Running is dispatcher-only
   return (
     <section
-      className={`flex shrink-0 flex-col rounded-card ${
+      aria-label={`${label} column`}
+      className={`flex shrink-0 flex-col rounded-card transition-[background-color,box-shadow] duration-200 ${
         running
-          ? 'w-76 bg-raised ring-1 ring-ember/25'
-          : `w-64 bg-raised/60 ${over ? 'ring-1 ring-ember/40' : ''}`
+          ? 'w-80 bg-raised shadow-md ring-1 ring-ember/20'
+          : `w-72 ${over ? 'bg-ember/5 ring-1 ring-ember/50' : ''}`
       }`}
       onDragOver={(e) => {
         if (droppable) {
@@ -107,8 +140,8 @@ function Column({
     >
       <header className="flex items-baseline justify-between px-3 pb-2 pt-3">
         <h2
-          className={`text-xs font-semibold uppercase tracking-widest ${
-            running ? 'text-ember' : 'text-dim'
+          className={`text-xs font-medium uppercase tracking-[0.12em] ${
+            running ? 'text-ember' : 'text-faint'
           }`}
         >
           {label}
@@ -125,9 +158,15 @@ function Column({
             score={scores[t.id]}
             heartbeat={heartbeats[t.id]}
             onOpen={onOpen}
+            onMove={onMove}
             onArchive={onArchive}
           />
         ))}
+        {tasks.length === 0 && (
+          <p className="rounded-card border border-dashed border-line px-3 py-5 text-center text-xs leading-relaxed text-faint">
+            {EMPTY_HINT[status]}
+          </p>
+        )}
         {droppable && <AddTaskInline status={status} projects={projects} onAddTask={onAddTask} />}
       </div>
     </section>
@@ -156,7 +195,7 @@ function AddTaskInline({
           setErr(null);
           if (!projectId && projects[0]) setProjectId(projects[0].id);
         }}
-        className="rounded-card px-3 py-1.5 text-left text-xs text-faint transition-colors hover:bg-overlay hover:text-dim"
+        className="rounded-card px-3 py-1.5 text-left text-xs text-faint transition-colors duration-150 hover:bg-overlay hover:text-dim"
       >
         + Add task
       </button>
@@ -175,7 +214,7 @@ function AddTaskInline({
   };
 
   return (
-    <div className="flex flex-col gap-1.5 rounded-card bg-overlay p-2">
+    <div className="flex flex-col gap-1.5 rounded-card bg-overlay p-2 shadow-sm">
       <input
         autoFocus
         value={title}
@@ -184,13 +223,15 @@ function AddTaskInline({
           if (e.key === 'Enter') void submit();
           if (e.key === 'Escape') setOpen(false);
         }}
+        aria-label="Task title"
         placeholder="Task title…"
-        className="rounded-chip bg-raised px-2 py-1 text-sm text-ink outline-none placeholder:text-faint focus:ring-1 focus:ring-ember/40"
+        className="rounded-chip border border-line bg-raised px-2 py-1 text-sm text-ink outline-none transition-colors duration-150 placeholder:text-faint hover:border-line-strong focus:border-ember"
       />
       <select
         value={projectId}
         onChange={(e) => setProjectId(e.target.value)}
-        className="rounded-chip bg-raised px-2 py-1 text-xs text-dim outline-none"
+        aria-label="Project"
+        className="rounded-chip border border-line bg-raised px-2 py-1 text-xs text-dim outline-none transition-colors duration-150 hover:border-line-strong focus:border-ember"
       >
         {projects.length === 0 && <option value="">no projects yet</option>}
         {projects.map((p) => (
@@ -199,17 +240,21 @@ function AddTaskInline({
           </option>
         ))}
       </select>
-      {err && <p className="text-[11px] text-danger">{err}</p>}
+      {err && (
+        <p role="alert" className="text-[11px] text-danger">
+          {err}
+        </p>
+      )}
       <div className="flex gap-1.5">
         <button
           onClick={() => void submit()}
-          className="rounded-chip bg-ember/20 px-2 py-0.5 text-xs font-medium text-ember hover:bg-ember/30"
+          className="rounded-chip bg-ember/20 px-2.5 py-1 text-xs font-medium text-ember transition-colors duration-150 hover:bg-ember/30"
         >
           Add
         </button>
         <button
           onClick={() => setOpen(false)}
-          className="rounded-chip px-2 py-0.5 text-xs text-faint hover:text-dim"
+          className="rounded-chip px-2.5 py-1 text-xs text-faint transition-colors duration-150 hover:text-dim"
         >
           Cancel
         </button>

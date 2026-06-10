@@ -1,11 +1,14 @@
 import { useState } from 'react';
-import type { ConfigDto, ProjectDto, ProviderPref, TaskDto } from '../types';
+import type { ConfigDto, ProjectDto, ProviderPref, TaskDto, TaskStatus } from '../types';
 import { effectiveModelEffort, fmtRel, PROVIDER_TINT, scoreColor } from '../lib';
 import { useNow } from '../useNow';
 
+/** WCAG 2.5.7 non-drag alternative targets ('running' is dispatcher-only). */
+const MOVE_TARGETS: TaskStatus[] = ['triage', 'todo', 'ready', 'blocked', 'done'];
+
 export function ProviderBadge({ pref }: { pref: ProviderPref }) {
   return (
-    <span className={`rounded-chip px-1.5 py-0.5 text-[10px] font-medium ${PROVIDER_TINT[pref]}`}>
+    <span className={`rounded-chip px-1.5 py-0.5 text-xs font-medium ${PROVIDER_TINT[pref]}`}>
       {pref}
     </span>
   );
@@ -16,7 +19,7 @@ export function ScoreRing({ score }: { score: number }) {
   const c = 2 * Math.PI * r;
   return (
     <span className="inline-flex items-center gap-1" title={`judge ${score}/5`}>
-      <svg width="16" height="16" viewBox="0 0 16 16" className="-rotate-90">
+      <svg width="16" height="16" viewBox="0 0 16 16" className="-rotate-90" aria-hidden="true">
         <circle cx="8" cy="8" r={r} fill="none" stroke="var(--color-line)" strokeWidth="2.5" />
         <circle
           cx="8"
@@ -55,6 +58,7 @@ export function TaskCard({
   score,
   heartbeat,
   onOpen,
+  onMove,
   onArchive,
 }: {
   task: TaskDto;
@@ -63,6 +67,7 @@ export function TaskCard({
   score: number | undefined;
   heartbeat: string | undefined;
   onOpen: (id: string) => void;
+  onMove: (id: string, status: TaskStatus) => void;
   onArchive: (id: string) => void;
 }) {
   const now = useNow(30_000);
@@ -72,53 +77,96 @@ export function TaskCard({
 
   return (
     <article
+      role="button"
+      tabIndex={0}
       draggable={!running}
       onDragStart={(e) => e.dataTransfer.setData('text/plain', task.id)}
       onClick={() => onOpen(task.id)}
-      className={`group relative cursor-pointer rounded-card bg-overlay px-3 py-2.5 ${
-        running ? 'run-pulse ring-1 ring-ember/30' : 'transition-colors hover:bg-overlay/70'
+      onKeyDown={(e) => {
+        if (e.target !== e.currentTarget) return;
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onOpen(task.id);
+        }
+      }}
+      className={`group relative cursor-pointer rounded-card bg-overlay px-4 py-3 shadow-sm transition-colors duration-150 ${
+        running ? 'run-pulse ring-1 ring-ember/30' : 'hover:bg-active'
       }`}
     >
       <div className="flex items-start justify-between gap-2">
-        <h3 className="text-sm font-medium leading-snug text-ink">{task.title}</h3>
+        <h3 className="line-clamp-2 text-sm font-medium leading-snug text-ink" title={task.title}>
+          {task.title}
+        </h3>
         <div className="relative shrink-0">
           <button
-            aria-label="card menu"
+            aria-label={`Actions for ${task.title}`}
+            aria-haspopup="menu"
+            aria-expanded={menu}
             onClick={(e) => {
               e.stopPropagation();
               setMenu((m) => !m);
             }}
-            className="rounded-chip px-1 text-faint opacity-0 transition-opacity hover:text-ink group-hover:opacity-100"
+            className="rounded-chip px-1.5 py-1 text-faint opacity-0 transition-opacity duration-150 hover:text-ink focus-visible:opacity-100 group-hover:opacity-100"
           >
             ⋯
           </button>
           {menu && (
-            <div
-              className="absolute right-0 top-5 z-10 rounded-chip bg-raised px-1 py-1 ring-1 ring-line"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <button
-                onClick={() => {
+            <>
+              <div
+                aria-hidden="true"
+                className="fixed inset-0 z-(--z-dropdown)"
+                onClick={(e) => {
+                  e.stopPropagation();
                   setMenu(false);
-                  onArchive(task.id);
                 }}
-                className="block w-full rounded-chip px-2 py-1 text-left text-xs text-dim hover:bg-overlay hover:text-ink"
+              />
+              <div
+                role="menu"
+                aria-label="Task actions"
+                className="absolute right-0 top-6 z-(--z-dropdown) w-36 rounded-card bg-raised p-1 shadow-lg ring-1 ring-line"
+                onClick={(e) => e.stopPropagation()}
               >
-                Archive
-              </button>
-            </div>
+                <p className="px-2 pb-0.5 pt-1 text-[10px] uppercase tracking-[0.12em] text-faint">
+                  move to
+                </p>
+                {MOVE_TARGETS.filter((s) => s !== task.status).map((s) => (
+                  <button
+                    key={s}
+                    role="menuitem"
+                    onClick={() => {
+                      setMenu(false);
+                      onMove(task.id, s);
+                    }}
+                    className="block w-full rounded-chip px-2 py-1 text-left text-xs text-dim transition-colors duration-150 hover:bg-overlay hover:text-ink"
+                  >
+                    {s}
+                  </button>
+                ))}
+                <div className="my-1 border-t border-line" />
+                <button
+                  role="menuitem"
+                  onClick={() => {
+                    setMenu(false);
+                    onArchive(task.id);
+                  }}
+                  className="block w-full rounded-chip px-2 py-1 text-left text-xs text-dim transition-colors duration-150 hover:bg-overlay hover:text-danger"
+                >
+                  archive
+                </button>
+              </div>
+            </>
           )}
         </div>
       </div>
 
       <div className="mt-1.5 flex flex-wrap items-center gap-1">
         {project && (
-          <span className="rounded-chip bg-raised px-1.5 py-0.5 text-[10px] text-dim">
+          <span className="rounded-chip bg-raised px-1.5 py-0.5 text-xs text-dim">
             {project.name}
           </span>
         )}
         <ProviderBadge pref={task.provider} />
-        <span className="rounded-chip bg-raised px-1.5 py-0.5 text-[10px] text-faint">
+        <span className="rounded-chip bg-raised px-1.5 py-0.5 text-xs text-faint">
           {model} · {effort}
         </span>
       </div>
@@ -128,7 +176,7 @@ export function TaskCard({
           <AttemptDots attempts={task.attempts} max={task.maxAttempts} />
           {score !== undefined && <ScoreRing score={score} />}
         </div>
-        <span className="text-[10px] text-faint">{fmtRel(task.updatedAt, now)}</span>
+        <span className="text-[11px] text-faint">{fmtRel(task.updatedAt, now)}</span>
       </div>
 
       {running && heartbeat && (

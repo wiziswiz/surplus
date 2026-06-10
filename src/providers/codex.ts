@@ -38,7 +38,12 @@ import { createWriteStream } from 'node:fs';
 import { mkdir, open, readdir, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { finalizeWorktree, prepareWorktree } from '../runner.js';
+import {
+  assertSafeFlagValue,
+  finalizeWorktree,
+  makeRedactingWriter,
+  prepareWorktree,
+} from '../runner.js';
 import { buildGoalCondition, redactSecrets } from '../vision.js';
 import type {
   ProviderAdapter,
@@ -377,6 +382,12 @@ export function codexAdapter(config: SurplusConfig, deps: CodexAdapterDeps = {})
       throw new Error('codex CLI not installed');
     }
 
+    // argv-injection guard: the model is untrusted (task row / VISION
+    // frontmatter / board PATCH) and `-m` has no reliable `=` form — a
+    // leading-dash value could be parsed as a flag of its own. (effort is
+    // already constrained by mapCodexEffort below.)
+    const model = assertSafeFlagValue('model', args.model);
+
     const startedAt = now();
     const attempt = Math.max(1, args.task.attempts ?? 1); // claim pre-increments
     await mkdir(args.logsDir, { recursive: true });
@@ -412,15 +423,20 @@ export function codexAdapter(config: SurplusConfig, deps: CodexAdapterDeps = {})
         '--output-last-message',
         lastMessagePath,
         '-m',
-        args.model,
+        model,
       ];
       const effort = mapCodexEffort(args.effort);
       if (effort) cliArgs.push('-c', `model_reasoning_effort="${effort}"`);
       cliArgs.push('-'); // read the prompt from stdin (avoids argv length limits)
 
-      const logStream = createWriteStream(logPath, { flags: 'a' });
+      const logStream = createWriteStream(logPath, { flags: 'a', mode: 0o600 });
+      logStream.on('error', () => {
+        /* logging must never crash the run (mirrors runner.ts) */
+      });
+      // Raw worker output is redacted before it touches disk (see runner.ts).
+      const redactedLog = makeRedactingWriter((text) => logStream.write(text));
       logStream.write(
-        `[surplus] codex exec start task=${args.task.id} attempt=${attempt} model=${args.model} effort=${effort ?? 'default'} at=${new Date(startedAt).toISOString()}\n`,
+        `[surplus] codex exec start task=${args.task.id} attempt=${attempt} model=${model} effort=${effort ?? 'default'} at=${new Date(startedAt).toISOString()}\n`,
       );
 
       const child = spawnFn('codex', cliArgs, {
@@ -434,11 +450,11 @@ export function codexAdapter(config: SurplusConfig, deps: CodexAdapterDeps = {})
         outputTail = (outputTail + chunk.toString()).slice(-OUTPUT_TAIL_BYTES);
       };
       child.stdout?.on('data', (chunk: Buffer) => {
-        logStream.write(chunk);
+        redactedLog.write(chunk.toString('utf8'));
         appendTail(chunk);
       });
       child.stderr?.on('data', (chunk: Buffer) => {
-        logStream.write(chunk);
+        redactedLog.write(chunk.toString('utf8'));
         appendTail(chunk);
       });
       if (child.stdin) {
@@ -450,6 +466,7 @@ export function codexAdapter(config: SurplusConfig, deps: CodexAdapterDeps = {})
 
       let timedOut = false;
       let watchdogAborted = false;
+      let settled = false; // true once the child has exited (or spawn failed)
       let graceTimer: NodeJS.Timeout | undefined;
       const timeoutMs = args.config.dispatcher.taskTimeoutMinutes * 60_000;
       const killTimer = setTimeout(() => {
@@ -459,7 +476,12 @@ export function codexAdapter(config: SurplusConfig, deps: CodexAdapterDeps = {})
       }, timeoutMs);
 
       // Dispatcher usage-watchdog abort (reserve ceiling crossed) → 'quota'.
+      // The settled guard stops a LATE abort (an in-flight watchdog poll that
+      // resolves after the run finished) from writing to an ended logStream,
+      // arming a kill timer against a dead pid, or flipping a completed run
+      // to 'quota'.
       const onAbort = (): void => {
+        if (settled) return;
         watchdogAborted = true;
         logStream.write('\n[surplus] usage watchdog abort — terminating codex worker\n');
         try {
@@ -485,13 +507,22 @@ export function codexAdapter(config: SurplusConfig, deps: CodexAdapterDeps = {})
           child.once('error', reject);
           child.once('close', (code, signal) => resolve({ code, signal }));
         });
+      } catch (err) {
+        // spawn-'error' path: close the log stream here too (the success-path
+        // end below is skipped), otherwise the fd leaks.
+        redactedLog.flush();
+        logStream.end();
+        throw err;
       } finally {
+        settled = true;
         clearTimeout(killTimer);
         if (graceTimer) clearTimeout(graceTimer);
         clearInterval(heartbeat);
+        args.signal?.removeEventListener('abort', onAbort);
       }
 
       const endedAt = now();
+      redactedLog.flush();
       await new Promise<void>((resolve) => logStream.end(resolve));
 
       let summary = '';

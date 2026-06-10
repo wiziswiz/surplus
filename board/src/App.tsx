@@ -1,10 +1,23 @@
+/**
+ * ANTI-SLOP GATE (declared before the polish pass, per the design playbook):
+ *  - Font: Instrument Sans 400/500/600/700 — never Inter/Roboto/system-ui.
+ *  - Accent: warm amber/copper OKLCH family (ember/copper/burn, hue 35–70),
+ *    codex secondary = jade/teal oklch(0.76 0.115 175). One accent moment per surface.
+ *  - Layout: left-aligned header KPIs, asymmetric kanban (Running column elevated,
+ *    other wells transparent), 16px column gutters / 8px card gaps (2:1 gestalt).
+ *  - Memorable detail: the BURNING banner's breathing underglow + live tabular-nums
+ *    countdowns. Hovers are surface shifts, never lifts.
+ *  - Rejected: purple/indigo, per-card colored borders, icon-in-colored-circle,
+ *    uniform radii, transition:all, toasts-for-errors, stagger-on-static.
+ */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createTask, getProjects, getState, getTasks, patchTask, setPausedApi } from './api';
-import type { EventDto, ProjectDto, StateDto, TaskDto, TaskStatus } from './types';
+import type { ConfigDto, EventDto, ProjectDto, StateDto, TaskDto, TaskStatus } from './types';
 import { Header } from './components/Header';
 import { Board } from './components/Board';
 import { Drawer } from './components/Drawer';
 import { AddProjectModal } from './components/AddProjectModal';
+import { SettingsPanel } from './components/SettingsPanel';
 
 export default function App() {
   const [state, setState] = useState<StateDto | null>(null);
@@ -15,6 +28,7 @@ export default function App() {
   const [drawerId, setDrawerId] = useState<string | null>(null);
   const [drawerVersion, setDrawerVersion] = useState(0);
   const [showAddProject, setShowAddProject] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
 
   const refetchTimer = useRef<number | null>(null);
   const drawerIdRef = useRef<string | null>(null);
@@ -152,12 +166,17 @@ export default function App() {
     [refetchTasks],
   );
 
+  const onConfigSaved = useCallback((cfg: ConfigDto) => {
+    setState((s) => (s ? { ...s, config: cfg } : s));
+  }, []);
+
   return (
     <div className="flex h-screen flex-col">
       <Header
         state={state}
         onTogglePause={togglePause}
         onAddProject={() => setShowAddProject(true)}
+        onOpenSettings={() => setShowSettings(true)}
       />
       <Board
         tasks={tasks}
@@ -169,6 +188,7 @@ export default function App() {
         onMove={moveTask}
         onAddTask={addTask}
         onArchive={(id) => void moveTask(id, 'archived')}
+        onAddProject={() => setShowAddProject(true)}
       />
       {drawerId && (
         <Drawer
@@ -188,6 +208,13 @@ export default function App() {
             setShowAddProject(false);
             void refreshAll();
           }}
+        />
+      )}
+      {showSettings && state && (
+        <SettingsPanel
+          config={state.config}
+          onClose={() => setShowSettings(false)}
+          onSaved={onConfigSaved}
         />
       )}
     </div>

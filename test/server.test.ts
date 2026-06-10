@@ -3,6 +3,8 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import {
+  applyConfigPatch,
+  buildConfigPatch,
   buildTaskPatch,
   redact,
   slugifyProjectId,
@@ -83,6 +85,7 @@ function makeConfig(): SurplusConfig {
       fiveHourBurst: { enabled: false, triggerMinutesBeforeReset: 30, weeklyGuardPct: 70 },
     },
     pacing: { fiveHourPausePct: 90 },
+    reserve: { weeklyPct: 10, fiveHourPct: 25, watchdogIntervalMinutes: 5 },
     dispatcher: { maxConcurrent: 1, maxAttempts: 3, taskTimeoutMinutes: 90, maxTurnsHint: 40 },
     judge: { model: 'sonnet' },
     board: { port: 4242 },
@@ -153,6 +156,49 @@ describe('buildTaskPatch', () => {
   });
 });
 
+describe('buildConfigPatch', () => {
+  it('accepts a valid nested partial', () => {
+    const r = buildConfigPatch({ reserve: { weeklyPct: 20 }, board: { port: 8080 } });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.patch).toEqual({ reserve: { weeklyPct: 20 }, board: { port: 8080 } });
+    }
+  });
+  it('rejects out-of-range percents and ports', () => {
+    expect(buildConfigPatch({ modes: { weeklySurplus: { stopAtPct: 120 } } }).ok).toBe(false);
+    expect(buildConfigPatch({ reserve: { weeklyPct: -1 } }).ok).toBe(false);
+    expect(buildConfigPatch({ reserve: { weeklyPct: 12.5 } }).ok).toBe(false);
+    expect(buildConfigPatch({ board: { port: 80 } }).ok).toBe(false);
+  });
+  it('rejects wrong types, non-positive ints, and unknown keys', () => {
+    expect(buildConfigPatch({ modes: { weeklySurplus: { enabled: 'yes' } } }).ok).toBe(false);
+    expect(buildConfigPatch({ dispatcher: { maxConcurrent: 0 } }).ok).toBe(false);
+    expect(buildConfigPatch({ judgePassScore: 9 }).ok).toBe(false);
+    expect(buildConfigPatch({ nope: 1 }).ok).toBe(false);
+    expect(buildConfigPatch({ dispatcher: { hax: 1 } }).ok).toBe(false);
+  });
+  it('rejects unknown providers and empty model strings', () => {
+    expect(buildConfigPatch({ providers: { gpt: { enabled: true } } }).ok).toBe(false);
+    expect(buildConfigPatch({ providers: { claude: { defaults: { model: '' } } } }).ok).toBe(false);
+  });
+  it('allows weeklyResetFallback as string or null only', () => {
+    expect(buildConfigPatch({ providers: { codex: { weeklyResetFallback: 'Thu 21:00' } } }).ok).toBe(true);
+    expect(buildConfigPatch({ providers: { codex: { weeklyResetFallback: null } } }).ok).toBe(true);
+    expect(buildConfigPatch({ providers: { codex: { weeklyResetFallback: 5 } } }).ok).toBe(false);
+  });
+  it('rejects an empty patch', () => {
+    expect(buildConfigPatch({}).ok).toBe(false);
+  });
+});
+
+describe('applyConfigPatch', () => {
+  it('merges nested values without dropping siblings', () => {
+    const next = applyConfigPatch(makeConfig(), { reserve: { weeklyPct: 30 } });
+    expect(next.reserve).toEqual({ weeklyPct: 30, fiveHourPct: 25, watchdogIntervalMinutes: 5 });
+    expect(next.modes.weeklySurplus.stopAtPct).toBe(95);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // HTTP integration
 // ---------------------------------------------------------------------------
@@ -163,6 +209,8 @@ const ac = new AbortController();
 const db = makeDb();
 let pausedFlag = false;
 const burnCalls: Array<[string | undefined, Provider | undefined]> = [];
+const serverConfig = makeConfig();
+const configPatches: unknown[] = [];
 let tmpRepo: string;
 
 beforeAll(async () => {
@@ -182,7 +230,7 @@ beforeAll(async () => {
   await startServer({
     port: PORT,
     db,
-    config: makeConfig(),
+    config: serverConfig,
     adapters: { claude: makeAdapter('claude') },
     decideFn: (input) => ({ action: 'idle', reason: `test:${input.usage.provider}` }),
     paused: () => pausedFlag,
@@ -193,6 +241,10 @@ beforeAll(async () => {
       triggerBurn: async (taskId, provider) => {
         burnCalls.push([taskId, provider]);
         return { dispatched: true };
+      },
+      updateConfig: (patch) => {
+        configPatches.push(patch);
+        return applyConfigPatch(serverConfig, patch);
       },
     },
     signal: ac.signal,
@@ -370,6 +422,52 @@ describe('pause / resume / burn', () => {
       body: JSON.stringify({ provider: 'gpt' }),
     });
     expect(badProv.status).toBe(400);
+  });
+});
+
+describe('PATCH /api/config', () => {
+  it('rejects invalid patches with 400', async () => {
+    const bads = [
+      { modes: { weeklySurplus: { stopAtPct: 120 } } },
+      { board: { port: 80 } },
+      { providers: { gpt: { enabled: true } } },
+      { providers: { claude: { defaults: { model: '' } } } },
+      { judgePassScore: 9 },
+      { reserve: { watchdogIntervalMinutes: 0 } },
+      { hax: true },
+      {},
+    ];
+    for (const body of bads) {
+      const res = await fetch(`${BASE}/api/config`, {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      });
+      expect(res.status).toBe(400);
+    }
+  });
+
+  it('deep-merges, persists via updateConfig, and reflects in /api/state', async () => {
+    const patch = {
+      reserve: { weeklyPct: 20 },
+      modes: { weeklySurplus: { stopAtPct: 90 } },
+      providers: { codex: { enabled: true, weeklyResetFallback: 'Thu 21:00' } },
+    };
+    const res = await fetch(`${BASE}/api/config`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    });
+    expect(res.status).toBe(200);
+    const cfg = (await res.json()) as SurplusConfig;
+    expect(cfg.reserve.weeklyPct).toBe(20);
+    expect(cfg.reserve.fiveHourPct).toBe(25); // untouched sibling survives
+    expect(cfg.modes.weeklySurplus.stopAtPct).toBe(90);
+    expect(cfg.modes.weeklySurplus.burnWindowHours).toBe(12); // untouched
+    expect(cfg.providers.codex.enabled).toBe(true);
+    expect(cfg.providers.codex.weeklyResetFallback).toBe('Thu 21:00');
+    expect(cfg.providers.codex.defaults.model).toBe('gpt-5.1-codex'); // untouched
+    expect(configPatches.at(-1)).toEqual(patch);
+    const state = (await (await fetch(`${BASE}/api/state`)).json()) as { config: SurplusConfig };
+    expect(state.config.reserve.weeklyPct).toBe(20);
   });
 });
 

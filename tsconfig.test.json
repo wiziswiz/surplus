@@ -1,0 +1,13 @@
+{
+  // Typecheck pass that INCLUDES test/ (the main tsconfig excludes it and
+  // vitest does not typecheck), so contract drift in test fixtures — e.g. a
+  // SurplusConfig fixture missing a newly-required key — fails `pnpm typecheck`.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "sourceMap": false
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"],
+  "exclude": ["node_modules", "dist", "board"]
+}

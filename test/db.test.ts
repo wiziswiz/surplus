@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -217,6 +217,56 @@ describe('claimNextReadyTask', () => {
     });
     expect(db.claimNextReadyTask(40_000, 'claude')).toBeNull();
     expect(db.claimNextReadyTask(60_000, 'claude')?.id).toBe(t.id);
+  });
+
+  it('refuses atomically once maxConcurrent tasks are running globally', () => {
+    const p = makeProject('pa');
+    const q = makeProject('pb');
+    db.createTask({ projectId: p.id, title: 'busy', status: 'running' });
+    const t = db.createTask({ projectId: q.id, title: 'waiting', status: 'ready' });
+    // The cap rides INSIDE the claim transaction (cross-process safe).
+    expect(db.claimNextReadyTask(Date.now(), 'claude', 1)).toBeNull();
+    expect(db.claimNextReadyTask(Date.now(), 'claude', 2)?.id).toBe(t.id);
+  });
+});
+
+describe('claimTaskById (forced one-shot claim)', () => {
+  it('claims a ready task: running, attempts incremented, forced-claim event', () => {
+    const p = makeProject();
+    const t = db.createTask({ projectId: p.id, title: 'forced', status: 'ready' });
+    const claimed = db.claimTaskById(t.id, Date.now(), 'claude');
+    expect(claimed?.status).toBe('running');
+    expect(claimed?.attempts).toBe(1);
+    const events = db.listEventsAfter(0).filter((e) => e.type === 'status-changed');
+    expect(JSON.parse(events.at(-1)!.data)).toMatchObject({ via: 'forced-claim' });
+  });
+
+  it('returns null and leaves the row untouched for non-ready / incompatible / missing tasks', () => {
+    const p = makeProject();
+    const done = db.createTask({ projectId: p.id, title: 'd', status: 'done' });
+    expect(db.claimTaskById(done.id, Date.now(), 'claude')).toBeNull();
+    expect(db.getTask(done.id)!.attempts).toBe(0);
+    expect(db.getTask(done.id)!.status).toBe('done');
+
+    const codexOnly = db.createTask({
+      projectId: p.id,
+      title: 'c',
+      status: 'ready',
+      provider: 'codex',
+    });
+    expect(db.claimTaskById(codexOnly.id, Date.now(), 'claude')).toBeNull();
+    expect(db.getTask(codexOnly.id)!.status).toBe('ready');
+    expect(db.claimTaskById(codexOnly.id, Date.now(), 'codex')?.status).toBe('running');
+
+    expect(db.claimTaskById('t_missing', Date.now(), 'claude')).toBeNull();
+  });
+
+  it('a second claim of the same task fails — no double-run, single attempt increment', () => {
+    const p = makeProject();
+    const t = db.createTask({ projectId: p.id, title: 'once', status: 'ready' });
+    expect(db.claimTaskById(t.id, Date.now(), 'claude')).not.toBeNull();
+    expect(db.claimTaskById(t.id, Date.now(), 'claude')).toBeNull();
+    expect(db.getTask(t.id)!.attempts).toBe(1);
   });
 });
 
@@ -476,8 +526,10 @@ describe('dispatchTick', () => {
     expect(judgeCalls).toBe(0);
 
     const after1 = db.getTask(t1.id)!;
-    expect(after1.status).toBe('ready'); // attempts 1 < maxAttempts 3
-    expect(after1.attempts).toBe(1);
+    expect(after1.status).toBe('ready');
+    // Non-merit interruption: the claim-time attempt increment is refunded so
+    // routine quota/watchdog clips can never push a healthy task to 'blocked'.
+    expect(after1.attempts).toBe(0);
     expect(after1.judgeFeedback).toContain('quota');
 
     const after2 = db.getTask(t2.id)!;
@@ -496,5 +548,106 @@ describe('dispatchTick', () => {
     const last = decisions[decisions.length - 1]!;
     expect(last.action).toBe('stop');
     expect(last.reason).toContain('respawn guard: claude');
+  });
+
+  it('forceProvider without a taskId is one-shot: launches exactly one task', async () => {
+    const pa = makeProject('pa');
+    const pb = makeProject('pb');
+    const t1 = db.createTask({ projectId: pa.id, title: 'one', status: 'ready', priority: 1 });
+    db.createTask({ projectId: pb.id, title: 'two', status: 'ready', priority: 2 });
+    const deps = makeDeps({
+      adapters: { claude: fakeAdapter('claude', () => makeRunnerResult()) },
+      // Outside any burn window — force must override the gating…
+      decideFn: () => ({ action: 'idle', reason: 'outside windows' }),
+      forceProvider: 'claude',
+    });
+    const res = await dispatchTick(deps);
+    // …but never drain the whole ready queue (the /api/burn one-shot contract).
+    expect(res.launched).toBe(1);
+    expect(res.results[0]!.taskId).toBe(t1.id);
+  });
+
+  it('forceProvider still respects a pace-wait decision (pacing / reserve 5h floor)', async () => {
+    const p = makeProject();
+    db.createTask({ projectId: p.id, title: 'hot window', status: 'ready' });
+    const deps = makeDeps({
+      adapters: { claude: fakeAdapter('claude', () => makeRunnerResult()) },
+      decideFn: () => ({ action: 'pace-wait', reason: '5h window hot' }),
+      forceProvider: 'claude',
+    });
+    const res = await dispatchTick(deps);
+    expect(res.launched).toBe(0);
+  });
+
+  it('forceTaskId refuses non-ready tasks via the guarded claim', async () => {
+    const p = makeProject();
+    const t = db.createTask({ projectId: p.id, title: 'not ready', status: 'todo' });
+    const deps = makeDeps({
+      adapters: { claude: fakeAdapter('claude', () => makeRunnerResult()) },
+      forceProvider: 'claude',
+      forceTaskId: t.id,
+    });
+    const res = await dispatchTick(deps);
+    expect(res.launched).toBe(0);
+    expect(db.getTask(t.id)!.status).toBe('todo');
+    expect(db.getTask(t.id)!.attempts).toBe(0);
+  });
+
+  it('usage watchdog aborts a run when a reserve ceiling is crossed mid-run → quota, attempt refunded', async () => {
+    vi.useFakeTimers();
+    try {
+      const p = makeProject();
+      const t = db.createTask({ projectId: p.id, title: 'long run', status: 'ready' });
+      let polls = 0;
+      const adapter: ProviderAdapter = {
+        provider: 'claude',
+        async getUsage() {
+          polls += 1;
+          // Poll 1 (pre-launch decide) is cool; watchdog polls see a hot 5h
+          // window (95 >= ceiling min(95, min(90, 100-25)+5) = 80).
+          return { ...healthyUsage('claude'), fiveHourPct: polls > 1 ? 95 : 10 };
+        },
+        runTask(args: RunTaskArgs) {
+          return new Promise<RunnerResult>((resolve) => {
+            args.signal!.addEventListener('abort', () =>
+              resolve(makeRunnerResult({ outcome: 'killed', summary: 'terminated', exitCode: null })),
+            );
+          });
+        },
+      };
+      let judgeCalls = 0;
+      const deps = makeDeps({
+        adapters: { claude: adapter },
+        judgeRun: async () => {
+          judgeCalls += 1;
+          return { score: 5, reasons: '', missing: '' };
+        },
+      });
+
+      const tickPromise = dispatchTick(deps);
+      // watchdogIntervalMinutes 5 → first mid-run poll at 5 minutes.
+      await vi.advanceTimersByTimeAsync(5 * 60_000 + 1_000);
+      const res = await tickPromise;
+
+      // Runner reported 'killed'; the dispatcher coerces a watchdog abort to 'quota'.
+      expect(res.results).toEqual([{ taskId: t.id, provider: 'claude', outcome: 'quota' }]);
+      expect(judgeCalls).toBe(0); // judge skipped for interrupted sessions
+
+      const after = db.getTask(t.id)!;
+      expect(after.status).toBe('ready');
+      expect(after.attempts).toBe(0); // interruption refunded
+
+      const run = db.listRunsForTask(t.id)[0]!;
+      expect(run.outcome).toBe('quota');
+      expect(run.summary).toContain('aborted by usage watchdog');
+
+      const notes = db
+        .listEventsAfter(0, 1000)
+        .filter((e) => e.type === 'run-heartbeat')
+        .map((e) => (JSON.parse(e.data) as { note?: string }).note ?? '');
+      expect(notes.some((n) => n.includes('usage watchdog aborting run'))).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

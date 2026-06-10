@@ -42,9 +42,50 @@ export interface ProviderConfigDto {
 
 export interface ConfigDto {
   providers: Record<Provider, ProviderConfigDto>;
-  dispatcher: { maxConcurrent: number; maxAttempts: number };
+  modes: {
+    weeklySurplus: { enabled: boolean; burnWindowHours: number; stopAtPct: number };
+    fiveHourBurst: { enabled: boolean; triggerMinutesBeforeReset: number; weeklyGuardPct: number };
+  };
+  pacing: { fiveHourPausePct: number };
+  reserve: { weeklyPct: number; fiveHourPct: number; watchdogIntervalMinutes: number };
+  dispatcher: {
+    maxConcurrent: number;
+    maxAttempts: number;
+    taskTimeoutMinutes: number;
+    maxTurnsHint: number;
+  };
+  judge: { model: string };
   board: { port: number };
   judgePassScore: number;
+}
+
+/** Deep partial of ConfigDto sent to PATCH /api/config. */
+export interface ConfigPatchDto {
+  providers?: Partial<
+    Record<
+      Provider,
+      {
+        enabled?: boolean;
+        defaults?: { model?: string; effort?: string };
+        weeklyResetFallback?: string | null;
+      }
+    >
+  >;
+  modes?: {
+    weeklySurplus?: { enabled?: boolean; burnWindowHours?: number; stopAtPct?: number };
+    fiveHourBurst?: { enabled?: boolean; triggerMinutesBeforeReset?: number; weeklyGuardPct?: number };
+  };
+  pacing?: { fiveHourPausePct?: number };
+  reserve?: { weeklyPct?: number; fiveHourPct?: number; watchdogIntervalMinutes?: number };
+  dispatcher?: {
+    maxConcurrent?: number;
+    maxAttempts?: number;
+    taskTimeoutMinutes?: number;
+    maxTurnsHint?: number;
+  };
+  judge?: { model?: string };
+  board?: { port?: number };
+  judgePassScore?: number;
 }
 
 export interface StateDto {

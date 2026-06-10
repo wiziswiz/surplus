@@ -40,6 +40,7 @@ function makeConfig(codexOverrides: Partial<SurplusConfig['providers']['codex']>
       fiveHourBurst: { enabled: false, triggerMinutesBeforeReset: 30, weeklyGuardPct: 70 },
     },
     pacing: { fiveHourPausePct: 90 },
+    reserve: { weeklyPct: 10, fiveHourPct: 25, watchdogIntervalMinutes: 5 },
     dispatcher: { maxConcurrent: 1, maxAttempts: 3, taskTimeoutMinutes: 90, maxTurnsHint: 40 },
     judge: { model: 'haiku' },
     board: { port: 4242 },
@@ -426,6 +427,22 @@ describe('codexAdapter.runTask', () => {
     await expect(adapter.runTask(makeRunTaskArgs(makeConfig()))).rejects.toThrow(
       'codex CLI not installed',
     );
+    expect(spawnSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects a leading-dash model before any worktree/subprocess work (argv-injection guard)', async () => {
+    const spawnSpy = vi.fn(() => {
+      throw new Error('spawn must not be called');
+    });
+    const adapter = codexAdapter(makeConfig(), {
+      checkCliInstalled: cliPresent,
+      now: () => NOW,
+      codexHome: '/tmp/nonexistent-codex-home',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      spawn: spawnSpy as any,
+    });
+    const args = { ...makeRunTaskArgs(makeConfig()), model: '--dangerously-evil' };
+    await expect(adapter.runTask(args)).rejects.toThrow(/unsafe model value/);
     expect(spawnSpy).not.toHaveBeenCalled();
   });
 });

@@ -170,6 +170,80 @@ describe('decide: weeklySurplus mode', () => {
   });
 });
 
+describe('decide: reserve floors (quota protected for other agents)', () => {
+  // Defaults: reserve {weeklyPct: 10, fiveHourPct: 25} tightens the ceilings to
+  // effective weekly stop = min(stopAtPct 95, 100-10) = 90 and effective 5h
+  // pause = min(fiveHourPausePct 90, 100-25) = 75. Every test here pins a pct
+  // where the RESERVE (not the raw mode threshold) is the binding constraint.
+
+  it('weekly reserve binds before stopAtPct: 92% → stop with reserve-floor reason', () => {
+    const d = run({ sevenDayPct: 92 }); // >= 90 (reserve) but < 95 (stopAtPct)
+    expect(d.action).toBe('stop');
+    expect(d.reason).toContain('reserve floor');
+    expect(d.reason).toContain('10%');
+    expect(d.nextCheckAt).toBe(NOW + 6 * HOUR_MS); // weekly reset
+  });
+
+  it('weekly reserve boundary: exactly 90% stops, 89% burns', () => {
+    expect(run({ sevenDayPct: 90 }).action).toBe('stop');
+    const d = run({ sevenDayPct: 89 });
+    expect(d.action).toBe('burn');
+    expect(d.mode).toBe('weeklySurplus');
+  });
+
+  it('5h reserve drives the pause: 80% → pace-wait with the reserve note', () => {
+    const d = run({ fiveHourPct: 80 }); // >= 75 (reserve) but < 90 (pausePct)
+    expect(d.action).toBe('pace-wait');
+    expect(d.reason).toContain('reserved for other agents');
+    expect(d.nextCheckAt).toBe(NOW + 2 * HOUR_MS); // 5h reset
+  });
+
+  it('5h reserve boundary: exactly 75% paces, 74% burns', () => {
+    expect(run({ fiveHourPct: 75 }).action).toBe('pace-wait');
+    expect(run({ fiveHourPct: 74 }).action).toBe('burn');
+  });
+
+  it('burst is blocked at the 5h reserve floor (75%) and fires just under it (74%)', () => {
+    const burstCfg = (c: SurplusConfig) => {
+      c.modes.weeklySurplus.enabled = false;
+      c.modes.fiveHourBurst.enabled = true;
+    };
+    const burstSnap: Partial<UsageSnapshot> = {
+      fiveHourResetsAt: new Date(NOW + 20 * MINUTE_MS),
+      sevenDayPct: 40,
+    };
+    expect(run({ ...burstSnap, fiveHourPct: 75 }, burstCfg).action).toBe('idle');
+    const d = run({ ...burstSnap, fiveHourPct: 74 }, burstCfg);
+    expect(d.action).toBe('burn');
+    expect(d.mode).toBe('fiveHourBurst');
+  });
+
+  it('burst weekly guard is tightened by the weekly reserve', () => {
+    const burstCfg = (c: SurplusConfig) => {
+      c.modes.weeklySurplus.enabled = false;
+      c.modes.fiveHourBurst.enabled = true;
+      c.modes.fiveHourBurst.weeklyGuardPct = 95; // looser than 100 - weeklyPct (90)
+    };
+    const burstSnap: Partial<UsageSnapshot> = {
+      fiveHourResetsAt: new Date(NOW + 20 * MINUTE_MS),
+      fiveHourPct: 60,
+    };
+    expect(run({ ...burstSnap, sevenDayPct: 92 }, burstCfg).action).toBe('idle'); // >= 90
+    expect(run({ ...burstSnap, sevenDayPct: 89 }, burstCfg).action).toBe('burn');
+  });
+
+  it('zeroed reserve restores the raw stopAtPct / pausePct boundaries', () => {
+    const noReserve = (c: SurplusConfig) => {
+      c.reserve.weeklyPct = 0;
+      c.reserve.fiveHourPct = 0;
+    };
+    expect(run({ sevenDayPct: 92 }, noReserve).action).toBe('burn'); // < stopAtPct 95
+    expect(run({ fiveHourPct: 80 }, noReserve).action).toBe('burn'); // < pausePct 90
+    expect(run({ sevenDayPct: 95 }, noReserve).action).toBe('stop');
+    expect(run({ fiveHourPct: 90 }, noReserve).action).toBe('pace-wait');
+  });
+});
+
 describe('decide: fiveHourBurst mode', () => {
   /** Weekly disabled, burst enabled, 20m left in the 5h window. */
   const burstCfg = (c: SurplusConfig) => {

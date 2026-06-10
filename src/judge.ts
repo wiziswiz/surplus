@@ -8,7 +8,7 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import type { JudgeVerdict, ProjectRow, TaskRow, Vision } from './types.js';
-import { extractFirstJsonObject, parseClaudeEnvelope } from './runner.js';
+import { assertSafeFlagValue, extractFirstJsonObject, parseClaudeEnvelope } from './runner.js';
 import { redactSecrets } from './vision.js';
 
 const JUDGE_TIMEOUT_MS = 10 * 60_000;
@@ -56,7 +56,34 @@ function isSafeBranch(branch: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9_\-./]*$/.test(branch);
 }
 
+/**
+ * Diff base for judging. surplus-scaffolded repos use 'main', but
+ * `surplus add` accepts arbitrary repos (master/develop/trunk default
+ * branches) — hardcoding 'main' there made both diffs fail and the judge
+ * score ~1 on complete work. Resolve the repo's default branch instead.
+ */
+function resolveDiffBase(projectPath: string): string {
+  try {
+    const head = git(projectPath, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']).trim();
+    if (head !== '') return head; // e.g. 'origin/main'
+  } catch {
+    /* no remote HEAD — local-only repo */
+  }
+  for (const candidate of ['main', 'master']) {
+    try {
+      git(projectPath, ['rev-parse', '--verify', '--quiet', `refs/heads/${candidate}`]);
+      return candidate;
+    } catch {
+      /* try next */
+    }
+  }
+  // Last resort: the checkout's HEAD. The triple-dot diff below uses the
+  // merge-base, so this still isolates the branch's own work.
+  return 'HEAD';
+}
+
 function gatherEvidence(args: JudgeRunArgs): {
+  diffBase: string;
   diffStat: string;
   patch: string;
   logTail: string;
@@ -64,17 +91,19 @@ function gatherEvidence(args: JudgeRunArgs): {
 } {
   const { run, projectPath } = args;
 
+  let diffBase = 'main';
   let diffStat = '(no branch — no diff available)';
   let patch = '';
   if (run.branch !== null && run.branch !== '' && isSafeBranch(run.branch)) {
+    diffBase = resolveDiffBase(projectPath);
     try {
-      diffStat = git(projectPath, ['diff', `main...${run.branch}`, '--stat']).trim();
+      diffStat = git(projectPath, ['diff', `${diffBase}...${run.branch}`, '--stat']).trim();
       if (diffStat === '') diffStat = '(empty diff — no changes on the branch)';
     } catch (err) {
       diffStat = `(diff --stat failed: ${redactSecrets(errMessage(err))})`;
     }
     try {
-      patch = git(projectPath, ['diff', `main...${run.branch}`]);
+      patch = git(projectPath, ['diff', `${diffBase}...${run.branch}`]);
       patch = cap(patch, PATCH_CAP, '\n…[diff truncated at 30KB]');
     } catch (err) {
       patch = `(diff failed: ${redactSecrets(errMessage(err))})`;
@@ -97,6 +126,7 @@ function gatherEvidence(args: JudgeRunArgs): {
       : '(worker produced no summary)';
 
   return {
+    diffBase,
     diffStat,
     patch,
     logTail: redactSecrets(logTail),
@@ -137,7 +167,7 @@ function buildJudgePrompt(args: JudgeRunArgs): string {
     '## VISION (acceptance criteria source of truth)',
     cap(vision.raw, VISION_CAP, '\n…[vision truncated]'),
     '',
-    '## Diff stat (main...branch)',
+    `## Diff stat (${evidence.diffBase}...branch)`,
     evidence.diffStat,
     '',
     '## Patch (capped at 30KB)',
@@ -254,8 +284,11 @@ function parseVerdict(resultText: string): JudgeVerdict {
  */
 export async function judgeRun(args: JudgeRunArgs): Promise<JudgeVerdict> {
   try {
+    // Same argv-injection guard as the workers: judgeModel becomes a
+    // `--model <value>` argv value (config-sourced, but guarded anyway).
+    const judgeModel = assertSafeFlagValue('judge model', args.judgeModel);
     const prompt = buildJudgePrompt(args);
-    const stdout = await runJudgeProcess(prompt, args.judgeModel, args.projectPath);
+    const stdout = await runJudgeProcess(prompt, judgeModel, args.projectPath);
     const envelope = parseClaudeEnvelope(stdout);
     const resultText = envelope.result ?? stdout;
     return parseVerdict(resultText);

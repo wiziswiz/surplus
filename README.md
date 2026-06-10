@@ -138,7 +138,9 @@ node bin/surplus.js status    # usage windows + current decision per provider
 ```
 
 Nothing runs until a burn window opens. To force one task through right now
-(ignores windows, still respects pacing): `node bin/surplus.js burn`.
+(ignores windows, still respects pacing and the kill switch):
+`node bin/surplus.js burn --force`. Without `--force` (or `--provider`),
+`burn` still respects the burn windows.
 
 ## The usage-endpoint gotcha
 
@@ -261,7 +263,7 @@ example (strip comments; the real file is plain JSON):
     "claude": {
       "enabled": true,
       "defaults": {
-        "model": "sonnet",          // opus | sonnet | haiku
+        "model": "opus",            // opus | sonnet | haiku
         "effort": "high"            // low | medium | high | xhigh | max
       }
     },
@@ -269,7 +271,7 @@ example (strip comments; the real file is plain JSON):
       "enabled": false,             // opt in to burning ChatGPT quota
       "defaults": {
         "model": "gpt-5.1-codex",   // codex CLI model id
-        "effort": "medium"          // codex reasoning effort
+        "effort": "high"            // codex reasoning effort
       },
       // When the codex CLI doesn't expose live usage: a known weekly reset,
       // ISO timestamp or 'Thu 21:00'-style weekday+time. null = no fallback
@@ -292,6 +294,11 @@ example (strip comments; the real file is plain JSON):
   "pacing": {
     "fiveHourPausePct": 90          // between launches, wait for 5h reset above this
   },
+  "reserve": {
+    "weeklyPct": 10,                // % of the 7-day window always left for other agents
+    "fiveHourPct": 25,              // % of the 5h window always left for other agents
+    "watchdogIntervalMinutes": 5    // mid-run usage poll cadence
+  },
   "dispatcher": {
     "maxConcurrent": 1,             // simultaneous running tasks
     "maxAttempts": 3,               // failures before a task is blocked
@@ -302,7 +309,7 @@ example (strip comments; the real file is plain JSON):
     "model": "haiku"                // judge always runs on claude
   },
   "board": {
-    "port": 4664                    // localhost-only kanban board
+    "port": 4242                    // localhost-only kanban board
   },
   "judgePassScore": 4               // judge score (1-5) at/above which a run is done
 }

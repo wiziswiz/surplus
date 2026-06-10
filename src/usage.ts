@@ -10,8 +10,11 @@
  *  - Returns { unavailable: true, error } on API failure.
  *  - File cache at ~/.surplus/.usage-cache.json: 5 min TTL on success, 15 s on
  *    failure. On 429, serves lastGoodData (error 'rate-limited',
- *    unavailable=false) while honoring Retry-After / exponential backoff
- *    (60s/120s/240s, capped 5 min) before refetching.
+ *    unavailable=false) while honoring Retry-After (clamped to the 5-min cap)
+ *    / exponential backoff (60s/120s/240s, capped 5 min) before refetching —
+ *    but only while lastGoodData is fresh enough to act on (15 min); older
+ *    data is reported unavailable so decide() and the reserve watchdog never
+ *    run on frozen numbers.
  *
  * SECURITY: the access token is only ever placed in the Authorization header.
  * It is never logged, cached, or embedded in errors.
@@ -33,6 +36,13 @@ const CACHE_TTL_MS = 5 * 60_000; // success
 const CACHE_FAILURE_TTL_MS = 15_000; // failure
 const RATE_LIMITED_BASE_MS = 60_000; // 429 backoff base
 const RATE_LIMITED_MAX_MS = 5 * 60_000; // 429 backoff cap
+/**
+ * Max age of lastGoodData served as live (unavailable=false) during a 429
+ * backoff. Persisting 429s would otherwise present hours-old utilization as
+ * current — decide() would keep burning and the mid-run reserve watchdog
+ * would be blind exactly when the account is hot enough to be rate-limited.
+ */
+const LAST_GOOD_MAX_AGE_MS = 15 * 60_000;
 
 /** Test seams. Production callers pass nothing. */
 export interface GetUsageOverrides {
@@ -162,8 +172,17 @@ function writeCacheFile(cachePath: string, cache: CacheFile): void {
 /** Rate-limit backoff deadline for a cached 429 failure, or null. */
 function getRateLimitedRetryUntil(cache: CacheFile): number | null {
   if (!(cache.data.error === 'rate-limited' && cache.data.unavailable)) return null;
-  if (cache.retryAfterUntil && cache.retryAfterUntil > cache.timestamp) return cache.retryAfterUntil;
+  if (cache.retryAfterUntil && cache.retryAfterUntil > cache.timestamp) {
+    // Clamp: a hostile/buggy Retry-After header must not pin the cache past
+    // the exponential backoff's own 5-min cap.
+    return Math.min(cache.retryAfterUntil, cache.timestamp + RATE_LIMITED_MAX_MS);
+  }
   return cache.timestamp + getRateLimitedTtlMs(cache.rateLimitedCount ?? 1);
+}
+
+/** True when lastGoodData is recent enough to present as live numbers. */
+function isFreshEnough(stored: StoredSnapshot, now: number): boolean {
+  return typeof stored.fetchedAt === 'number' && now - stored.fetchedAt < LAST_GOOD_MAX_AGE_MS;
 }
 
 /** Snapshot to serve without refetching, or null when a refetch is due. */
@@ -171,10 +190,12 @@ function serveFromCache(cache: CacheFile, now: number): UsageSnapshot | null {
   const retryUntil = getRateLimitedRetryUntil(cache);
   if (retryUntil !== null) {
     if (now >= retryUntil) return null; // backoff elapsed -> refetch
-    if (cache.lastGoodData) {
+    if (cache.lastGoodData && isFreshEnough(cache.lastGoodData, now)) {
       return { ...hydrate(cache.lastGoodData), error: 'rate-limited', unavailable: false };
     }
-    return hydrate(cache.data); // no good data to fall back on
+    // No good data — or it aged out: report unavailable so decide() stops
+    // rather than burning on frozen numbers.
+    return hydrate(cache.data);
   }
   const ttl = cache.data.unavailable ? CACHE_FAILURE_TTL_MS : CACHE_TTL_MS;
   return now - cache.timestamp < ttl ? hydrate(cache.data) : null;
@@ -303,7 +324,7 @@ export async function getUsage(overrides: GetUsageOverrides = {}): Promise<Usage
       ...(retryAfterUntil !== undefined ? { retryAfterUntil } : {}),
       ...(lastGood ? { lastGoodData: lastGood } : {}),
     });
-    if (lastGood) {
+    if (lastGood && isFreshEnough(lastGood, now)) {
       return { ...hydrate(lastGood), error: 'rate-limited', unavailable: false };
     }
     return failure;

@@ -328,10 +328,14 @@ export interface Vision {
 //   GET  /api/tasks?status=...       → TaskRow[] (all non-archived when no filter)
 //   POST /api/tasks                  → body Partial<TaskRow> & {projectId,title} → TaskRow
 //   GET  /api/tasks/:id              → {task: TaskRow, runs: TaskRunRow[], events: TaskEventRow[]}
-//   PATCH /api/tasks/:id             → body Partial<Pick<TaskRow,'status'|'priority'|'title'|'body'|'model'|'effort'|'scheduledAt'>> → TaskRow
+//   PATCH /api/tasks/:id             → body Partial<Pick<TaskRow,'status'|'priority'|'title'|'body'|'model'|'effort'|'scheduledAt'|'provider'>> → TaskRow ('running' is dispatcher-only)
+//   PATCH /api/config                → body deep-partial SurplusConfig (validated by server.ts buildConfigPatch:
+//                                      booleans, integer percents 0–100, positive-integer minutes/hours,
+//                                      port 1024–65535, non-empty model/effort, provider keys claude|codex)
+//                                      → effective SurplusConfig (persisted via the cli-injected updateConfig dep)
 //   POST /api/pause | /api/resume    → {paused: boolean}
-//   POST /api/burn                   → body {taskId?: string} → manual one-shot dispatch (ignores windows, respects pacing)
-//   GET  /api/events?after=<id>      → SSE stream of TaskEventRow (named event: 'ev')
+//   POST /api/burn                   → body {taskId?: string, provider?: Provider} → manual one-shot dispatch (ignores windows, respects pacing)
+//   GET  /api/events?after=<id>      → SSE stream of TaskEventRow (named event: 'ev') + periodic 'state' frames (ApiState)
 //
 export interface ApiState {
   /** Per-provider snapshots; key absent when the provider is disabled. */

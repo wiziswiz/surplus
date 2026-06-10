@@ -110,6 +110,66 @@ function errMessage(err: unknown): string {
 }
 
 // ---------------------------------------------------------------------------
+// CLI flag-value guard & redacting log writer (shared with providers/codex.ts
+// and judge.ts)
+// ---------------------------------------------------------------------------
+
+/**
+ * Guard a model/effort string before it becomes a CLI flag VALUE
+ * (`--model <value>` / `-m <value>`). These values flow in from
+ * attacker-influenceable sources — VISION.md frontmatter (including
+ * LLM-drafted ones), board PATCHes, and task rows — and a leading '-' could
+ * be parsed by the downstream claude/codex CLI as a flag of its own,
+ * subverting the load-bearing permission recipe. Throws on anything that
+ * isn't a plain model/effort token.
+ */
+export function assertSafeFlagValue(kind: string, value: string): string {
+  const v = typeof value === 'string' ? value.trim() : '';
+  if (v === '' || v.length > 128 || !/^[A-Za-z0-9][A-Za-z0-9._/:-]*$/.test(v)) {
+    throw new Error(`unsafe ${kind} value rejected: ${JSON.stringify(String(value).slice(0, 64))}`);
+  }
+  return v;
+}
+
+const REDACT_BUFFER_CAP = 64 * 1024;
+
+/**
+ * Line-buffered redacting writer for raw worker output. The worker runs with
+ * Bash(*) and full repo/network access, so its stdout/stderr can trivially
+ * surface credentials (`env`, ~/.claude, .env files) — every chunk is passed
+ * through redactSecrets before it reaches the on-disk log. Buffering to line
+ * boundaries keeps a token split across chunks detectable.
+ */
+export function makeRedactingWriter(write: (text: string) => void): {
+  write: (chunk: string) => void;
+  flush: () => void;
+} {
+  let buf = '';
+  return {
+    write(chunk: string): void {
+      buf += chunk;
+      const idx = buf.lastIndexOf('\n');
+      if (idx === -1) {
+        // Pathologically long line: flush anyway so memory stays bounded.
+        if (buf.length > REDACT_BUFFER_CAP) {
+          write(redactSecrets(buf));
+          buf = '';
+        }
+        return;
+      }
+      write(redactSecrets(buf.slice(0, idx + 1)));
+      buf = buf.slice(idx + 1);
+    },
+    flush(): void {
+      if (buf !== '') {
+        write(redactSecrets(buf));
+        buf = '';
+      }
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Worktree helpers (reused by providers/codex.ts)
 // ---------------------------------------------------------------------------
 
@@ -236,7 +296,7 @@ export function finalizeWorktree(args: {
  * Outcome 'failed' means completed-pending-judge (see file header).
  */
 export async function runTask(args: RunTaskArgs): Promise<RunnerResult> {
-  const { task, project, vision, model, effort, config, logsDir, worktreesDir } = args;
+  const { task, project, vision, config, logsDir, worktreesDir } = args;
   const startedAt = Date.now();
 
   mkdirSync(logsDir, { recursive: true });
@@ -244,6 +304,26 @@ export async function runTask(args: RunTaskArgs): Promise<RunnerResult> {
   // row we receive already reflects THIS attempt's number.
   const attempt = Math.max(1, task.attempts ?? 1);
   const logPath = path.join(logsDir, `${task.id}-attempt${attempt}.log`);
+
+  // argv-injection guard: model/effort are untrusted (task row / VISION
+  // frontmatter / board PATCH) and become `--model <v> --effort <v>` argv
+  // values below.
+  let model: string;
+  let effort: string;
+  try {
+    model = assertSafeFlagValue('model', args.model);
+    effort = assertSafeFlagValue('effort', args.effort);
+  } catch (err) {
+    return {
+      outcome: 'error',
+      exitCode: null,
+      branch: null,
+      summary: redactSecrets(errMessage(err)),
+      logPath,
+      startedAt,
+      endedAt: Date.now(),
+    };
+  }
 
   let worktreePath: string;
   let branch: string;
@@ -326,10 +406,13 @@ function runClaudeGoal(opts: {
   const { argv, cwd, branch, logPath, timeoutMs, onHeartbeat, header, startedAt, signal } = opts;
 
   return new Promise<RunnerResult>((resolve) => {
-    const log = createWriteStream(logPath, { flags: 'a' });
+    const log = createWriteStream(logPath, { flags: 'a', mode: 0o600 });
     log.on('error', () => {
       /* logging must never crash the run */
     });
+    // Raw child output is redacted before it touches disk — the worker holds
+    // Bash(*) and could surface credentials in its own output.
+    const redactedLog = makeRedactingWriter((text) => log.write(text));
     log.write(header);
 
     const child = spawn('claude', argv, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -386,13 +469,13 @@ function runClaudeGoal(opts: {
 
     child.stdout?.on('data', (chunk: Buffer) => {
       const text = chunk.toString('utf8');
-      log.write(text);
+      redactedLog.write(text);
       stdoutBuf = (stdoutBuf + text).slice(-STDOUT_KEEP);
       appendRecent(text);
     });
     child.stderr?.on('data', (chunk: Buffer) => {
       const text = chunk.toString('utf8');
-      log.write(text);
+      redactedLog.write(text);
       stderrTail = (stderrTail + text).slice(-STDERR_KEEP);
       appendRecent(text);
     });
@@ -502,6 +585,7 @@ function runClaudeGoal(opts: {
         outcome = 'quota';
       }
 
+      redactedLog.flush();
       log.end();
       resolve({
         outcome,

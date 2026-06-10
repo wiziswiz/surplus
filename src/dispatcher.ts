@@ -142,24 +142,15 @@ function computeBurning(
   decisions: Partial<Record<Provider, Decision>>,
 ): Provider[] {
   if (deps.forceProvider) {
-    // Force overrides decide() gating but never the kill switch.
+    // Force overrides decide() window gating ('idle'/'stop'), but never the
+    // kill switch, and — per the /api/burn contract "ignores windows,
+    // respects pacing" — never a 'pace-wait' (which already folds in the
+    // reserve 5h floor).
     if (deps.paused()) return [];
+    if (decisions[deps.forceProvider]?.action === 'pace-wait') return [];
     return deps.adapters[deps.forceProvider] ? [deps.forceProvider] : [];
   }
   return PROVIDERS.filter((p) => decisions[p]?.action === 'burn');
-}
-
-/** Claim a specific task for a manual one-shot burn: 'ready' + provider-compatible. */
-function claimForcedTask(
-  db: SurplusDb,
-  taskId: string,
-  provider: Provider,
-): TaskRow | null {
-  const task = db.getTask(taskId);
-  if (!task) return null;
-  if (task.status !== 'ready') return null;
-  if (task.provider !== 'any' && task.provider !== provider) return null;
-  return db.updateTask(taskId, { status: 'running', attempts: task.attempts + 1 });
 }
 
 function buildFeedback(
@@ -246,11 +237,14 @@ async function runOne(
   );
   const watchdogMs = Math.max(1, reserve.watchdogIntervalMinutes) * 60_000;
   const abort = new AbortController();
+  // clearInterval cannot cancel an in-flight getUsage() poll; runDone stops a
+  // late-resolving poll from aborting after the run already finished.
+  let runDone = false;
   const watchdog = setInterval(() => {
     void adapter
       .getUsage()
       .then((u) => {
-        if (u == null || u.unavailable || abort.signal.aborted) return;
+        if (runDone || u == null || u.unavailable || abort.signal.aborted) return;
         const fiveHot = u.fiveHourPct != null && u.fiveHourPct >= fiveHourCeil;
         const weeklyHot = u.sevenDayPct != null && u.sevenDayPct >= weeklyCeil;
         if (fiveHot || weeklyHot) {
@@ -299,6 +293,7 @@ async function runOne(
       endedAt: nowFn(),
     };
   } finally {
+    runDone = true;
     clearInterval(watchdog);
   }
   // A watchdog abort is a quota stop regardless of how the runner reported it.
@@ -352,14 +347,22 @@ async function runOne(
     db.updateTask(task.id, { status: 'done', judgeFeedback: null });
     log(`dispatch: task ${task.id} done (judge ${verdict!.score}/5)`);
   } else {
-    const blocked = fresh.attempts >= fresh.maxAttempts;
+    // Non-merit interruptions (reserve-watchdog/quota stops, user pause)
+    // refund the claim-time attempt increment: the watchdog is DESIGNED to
+    // fire near ceilings, and three routine clips must not permanently block
+    // a task that never failed on the merits.
+    const interrupted =
+      verdict === null && (result.outcome === 'quota' || result.outcome === 'killed');
+    const blocked = !interrupted && fresh.attempts >= fresh.maxAttempts;
     db.updateTask(task.id, {
       status: blocked ? 'blocked' : 'ready',
+      ...(interrupted ? { attempts: Math.max(0, fresh.attempts - 1) } : {}),
       judgeFeedback: buildFeedback(verdict, result, fresh.judgeFeedback),
     });
     log(
       `dispatch: task ${task.id} ${blocked ? 'blocked' : 'requeued'} ` +
-        `(attempt ${fresh.attempts}/${fresh.maxAttempts}, outcome ${finalOutcome})`,
+        `(attempt ${fresh.attempts}/${fresh.maxAttempts}${interrupted ? ', refunded' : ''}, ` +
+        `outcome ${finalOutcome})`,
     );
   }
 
@@ -411,11 +414,15 @@ export async function dispatchTick(deps: DispatchDeps): Promise<DispatchResult> 
       let task: TaskRow | null = null;
       if (deps.forceTaskId) {
         if (!forcedClaimed) {
-          task = claimForcedTask(db, deps.forceTaskId, provider);
+          // Single guarded UPDATE in the db — atomic against a concurrent
+          // tick's claim, so two processes can never run the same task.
+          task = db.claimTaskById(deps.forceTaskId, nowFn(), provider);
           if (task) forcedClaimed = true;
         }
       } else {
-        task = db.claimNextReadyTask(nowFn(), provider);
+        // maxConcurrent rides inside the claim transaction so the global
+        // concurrency cap holds across processes, not just within this loop.
+        task = db.claimNextReadyTask(nowFn(), provider, deps.config.dispatcher.maxConcurrent);
       }
       if (task) {
         claimedTask = task;
@@ -449,7 +456,9 @@ export async function dispatchTick(deps: DispatchDeps): Promise<DispatchResult> 
       break;
     }
 
-    if (deps.forceTaskId) break; // manual one-shot
+    // Manual burns are one-shot (the /api/burn contract): a forced provider
+    // without a taskId must not drain the entire ready queue.
+    if (deps.forceTaskId || deps.forceProvider) break;
 
     // Step 6: re-evaluate cheaply (usage cached by adapters); drop non-burners.
     decisions = await evaluateProviders(deps, nowFn);

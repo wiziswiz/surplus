@@ -65,6 +65,12 @@ export interface ServerDeps {
   scaffoldProject?: (name: string) => Promise<ProjectRow>;
   /** Manual one-shot dispatch (ignores windows, respects pacing). */
   triggerBurn?: (taskId?: string, provider?: Provider) => Promise<unknown>;
+  /**
+   * Persist a validated config patch (deep-merge over the loaded config and
+   * save); returns the new effective config. Injected by cli.ts using
+   * loadConfig/saveConfig — PATCH /api/config is 503 without it.
+   */
+  updateConfig?: (patch: ConfigPatch) => SurplusConfig | Promise<SurplusConfig>;
 }
 
 export interface StartServerOptions {
@@ -199,6 +205,166 @@ export function buildTaskPatch(
   }
   if (Object.keys(patch).length === 0) return { ok: false, error: 'no patchable fields' };
   return { ok: true, patch };
+}
+
+// ---------------------------------------------------------------------------
+// PATCH /api/config — validation + deep merge
+// ---------------------------------------------------------------------------
+
+/** Deep partial of SurplusConfig accepted by PATCH /api/config. */
+export interface ConfigPatch {
+  providers?: Partial<
+    Record<
+      Provider,
+      {
+        enabled?: boolean;
+        defaults?: { model?: string; effort?: string };
+        weeklyResetFallback?: string | null;
+      }
+    >
+  >;
+  modes?: {
+    weeklySurplus?: { enabled?: boolean; burnWindowHours?: number; stopAtPct?: number };
+    fiveHourBurst?: { enabled?: boolean; triggerMinutesBeforeReset?: number; weeklyGuardPct?: number };
+  };
+  pacing?: { fiveHourPausePct?: number };
+  reserve?: { weeklyPct?: number; fiveHourPct?: number; watchdogIntervalMinutes?: number };
+  dispatcher?: {
+    maxConcurrent?: number;
+    maxAttempts?: number;
+    taskTimeoutMinutes?: number;
+    maxTurnsHint?: number;
+  };
+  judge?: { model?: string };
+  board?: { port?: number };
+  judgePassScore?: number;
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+type FieldCheck = (v: unknown, path: string) => string | null;
+interface SpecNode {
+  [key: string]: FieldCheck | SpecNode;
+}
+
+const wantBool: FieldCheck = (v, p) => (typeof v === 'boolean' ? null : `${p} must be a boolean`);
+const wantPct: FieldCheck = (v, p) =>
+  Number.isInteger(v) && (v as number) >= 0 && (v as number) <= 100
+    ? null
+    : `${p} must be an integer 0–100`;
+const wantPosInt: FieldCheck = (v, p) =>
+  Number.isInteger(v) && (v as number) > 0 ? null : `${p} must be a positive integer`;
+const wantPort: FieldCheck = (v, p) =>
+  Number.isInteger(v) && (v as number) >= 1024 && (v as number) <= 65535
+    ? null
+    : `${p} must be an integer 1024–65535`;
+const wantStr: FieldCheck = (v, p) =>
+  typeof v === 'string' && v.trim().length > 0 ? null : `${p} must be a non-empty string`;
+const wantScore: FieldCheck = (v, p) =>
+  Number.isInteger(v) && (v as number) >= 1 && (v as number) <= 5
+    ? null
+    : `${p} must be an integer 1–5`;
+const wantResetFallback: FieldCheck = (v, p) =>
+  v === null || (typeof v === 'string' && v.trim().length > 0)
+    ? null
+    : `${p} must be a non-empty string or null`;
+
+const PROVIDER_SPEC: SpecNode = {
+  enabled: wantBool,
+  defaults: { model: wantStr, effort: wantStr },
+  weeklyResetFallback: wantResetFallback,
+};
+
+const CONFIG_SPEC: SpecNode = {
+  modes: {
+    weeklySurplus: { enabled: wantBool, burnWindowHours: wantPosInt, stopAtPct: wantPct },
+    fiveHourBurst: { enabled: wantBool, triggerMinutesBeforeReset: wantPosInt, weeklyGuardPct: wantPct },
+  },
+  pacing: { fiveHourPausePct: wantPct },
+  reserve: { weeklyPct: wantPct, fiveHourPct: wantPct, watchdogIntervalMinutes: wantPosInt },
+  dispatcher: {
+    maxConcurrent: wantPosInt,
+    maxAttempts: wantPosInt,
+    taskTimeoutMinutes: wantPosInt,
+    maxTurnsHint: wantPosInt,
+  },
+  judge: { model: wantStr },
+  board: { port: wantPort },
+  judgePassScore: wantScore,
+};
+
+function walkSpec(
+  value: unknown,
+  spec: FieldCheck | SpecNode,
+  path: string,
+): { ok: true; value: unknown } | { ok: false; error: string } {
+  if (typeof spec === 'function') {
+    const issue = spec(value, path);
+    return issue ? { ok: false, error: issue } : { ok: true, value };
+  }
+  if (!isPlainObject(value)) return { ok: false, error: `${path} must be an object` };
+  const out: Record<string, unknown> = {};
+  for (const [key, v] of Object.entries(value)) {
+    if (v === undefined) continue;
+    const sub = spec[key];
+    const subPath = `${path}.${key}`;
+    if (!sub) return { ok: false, error: `unknown config key '${subPath}'` };
+    const r = walkSpec(v, sub, subPath);
+    if (!r.ok) return r;
+    out[key] = r.value;
+  }
+  return { ok: true, value: out };
+}
+
+/** Validate an untrusted body into a ConfigPatch; unknown keys/bad types reject. */
+export function buildConfigPatch(
+  body: Record<string, unknown>,
+): { ok: true; patch: ConfigPatch } | { ok: false; error: string } {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(body)) {
+    if (value === undefined) continue;
+    if (key === 'providers') {
+      if (!isPlainObject(value)) return { ok: false, error: 'providers must be an object' };
+      const provs: Record<string, unknown> = {};
+      for (const [prov, pv] of Object.entries(value)) {
+        if (!isProvider(prov)) {
+          return { ok: false, error: `unknown provider '${prov}' (claude|codex)` };
+        }
+        const r = walkSpec(pv, PROVIDER_SPEC, `providers.${prov}`);
+        if (!r.ok) return r;
+        provs[prov] = r.value;
+      }
+      out.providers = provs;
+      continue;
+    }
+    const spec = CONFIG_SPEC[key];
+    if (!spec) return { ok: false, error: `unknown config key '${key}'` };
+    const r = walkSpec(value, spec, key);
+    if (!r.ok) return r;
+    out[key] = r.value;
+  }
+  if (Object.keys(out).length === 0) return { ok: false, error: 'no config fields to update' };
+  return { ok: true, patch: out as ConfigPatch };
+}
+
+/**
+ * Deep-merge a validated patch over a full config. Plain objects merge
+ * key-by-key; primitives/null replace. Pure — returns a new object.
+ */
+export function applyConfigPatch(base: SurplusConfig, patch: ConfigPatch): SurplusConfig {
+  function merge<T>(b: T, o: unknown): T {
+    if (!isPlainObject(b) || !isPlainObject(o)) return o === undefined ? b : (o as T);
+    const out: Record<string, unknown> = { ...b };
+    for (const [k, v] of Object.entries(o)) {
+      if (v === undefined) continue;
+      const bv = (b as Record<string, unknown>)[k];
+      out[k] = isPlainObject(bv) && isPlainObject(v) ? merge(bv, v) : v;
+    }
+    return out as T;
+  }
+  return merge(base, patch);
 }
 
 // ---------------------------------------------------------------------------
@@ -449,6 +615,26 @@ export async function startServer(opts: StartServerOptions): Promise<void> {
     } catch (e) {
       return c.json({ ok: false, error: errMsg(e) }, 500);
     }
+  });
+
+  // --- config -----------------------------------------------------------------
+
+  app.patch('/api/config', async (c) => {
+    if (!deps?.updateConfig) return c.json({ error: 'config updates not available' }, 503);
+    const body = await readJson(c);
+    if (!body) return c.json({ error: 'invalid JSON body' }, 400);
+    const built = buildConfigPatch(body);
+    if (!built.ok) return c.json({ error: built.error }, 400);
+    let effective: SurplusConfig;
+    try {
+      effective = await deps.updateConfig(built.patch);
+    } catch (e) {
+      return c.json({ error: `config update failed: ${errMsg(e)}` }, 500);
+    }
+    // Mutate the shared config object so /api/state and decide() see the new
+    // values immediately (cli passes the same reference to the dispatcher).
+    Object.assign(config, effective);
+    return c.json(effective);
   });
 
   // --- SSE -----------------------------------------------------------------

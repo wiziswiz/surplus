@@ -1,4 +1,6 @@
 import type {
+  ConfigDto,
+  ConfigPatchDto,
   ProjectDto,
   Provider,
   StateDto,
@@ -39,11 +41,20 @@ export const createTask = (body: { projectId: string; title: string; status?: Ta
 export const createProject = (body: { path: string } | { name: string }) =>
   api<ProjectDto>('/api/projects', { method: 'POST', body: JSON.stringify(body) });
 
+/** Mirrors the dispatcher's DispatchResult (returned in the burn response). */
+export interface BurnResultDto {
+  launched: number;
+  results: Array<{ taskId: string; provider: string; outcome: string }>;
+}
+
 export const burnNow = (taskId?: string, provider?: Provider) =>
-  api<{ ok: boolean }>('/api/burn', {
+  api<{ ok: boolean; result: BurnResultDto | null }>('/api/burn', {
     method: 'POST',
     body: JSON.stringify({ taskId, provider }),
   });
 
 export const setPausedApi = (paused: boolean) =>
   api<{ paused: boolean }>(`/api/${paused ? 'pause' : 'resume'}`, { method: 'POST' });
+
+export const patchConfig = (patch: ConfigPatchDto) =>
+  api<ConfigDto>('/api/config', { method: 'PATCH', body: JSON.stringify(patch) });

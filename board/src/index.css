@@ -3,25 +3,50 @@
 @theme {
   --font-sans: "Instrument Sans", ui-sans-serif, system-ui, sans-serif;
 
-  /* Warm-tinted dark surfaces — depth via color layering, not shadow */
-  --color-base: oklch(0.16 0.012 60);
-  --color-raised: oklch(0.19 0.014 60);
-  --color-overlay: oklch(0.22 0.016 60);
-  --color-line: oklch(0.28 0.018 60);
+  /* OKLCH surface scale at warm hue ~60 (playbook §2) — depth via lighter layers */
+  --color-base: oklch(0.13 0.01 60); /* page */
+  --color-raised: oklch(0.17 0.012 60); /* cards / header / drawer */
+  --color-overlay: oklch(0.21 0.015 60); /* elevated / hover wells */
+  --color-active: oklch(0.25 0.018 60); /* active / selected / hover shift */
+  --color-line: oklch(0.25 0.01 60);
+  --color-line-strong: oklch(0.35 0.015 60);
 
-  --color-ink: oklch(0.93 0.012 75);
-  --color-dim: oklch(0.67 0.016 65);
-  --color-faint: oklch(0.48 0.014 60);
+  --color-ink: oklch(0.95 0.012 75); /* never pure white */
+  --color-dim: oklch(0.7 0.014 65);
+  --color-faint: oklch(0.5 0.012 60);
 
-  /* Warm amber/copper primary + burn; teal-green secondary */
+  /* Warm amber/copper accent family (claude) + jade/teal secondary (codex) */
   --color-ember: oklch(0.78 0.145 70);
   --color-copper: oklch(0.65 0.125 50);
   --color-burn: oklch(0.6 0.19 35);
   --color-jade: oklch(0.76 0.115 175);
   --color-danger: oklch(0.6 0.2 27);
 
-  --radius-card: 10px;
+  /* Non-uniform radii: cards 8 / chips 4 / floating panels 12 */
+  --radius-card: 8px;
   --radius-chip: 4px;
+  --radius-panel: 12px;
+
+  /* Dual-shadow system (playbook §5): inner top edge + tinted drop */
+  --shadow-sm: inset 0 1px 0 0 oklch(1 0 0 / 0.05), 0 1px 2px 0 oklch(0.05 0.01 60 / 0.25);
+  --shadow-md: inset 0 1px 0 0 oklch(1 0 0 / 0.08), 0 2px 8px -2px oklch(0.05 0.01 60 / 0.35);
+  --shadow-lg: inset 0 1px 0 0 oklch(1 0 0 / 0.1), 0 8px 24px -4px oklch(0.05 0.01 60 / 0.45);
+  --shadow-xl: 0 16px 48px -8px oklch(0.05 0.01 60 / 0.4), 0 4px 12px -2px oklch(0.05 0.01 60 / 0.25);
+}
+
+:root {
+  /* Motion (playbook §6) — cubic-bezier only, no `ease`/`linear` UI curves */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in: cubic-bezier(0.55, 0.085, 0.68, 0.53);
+  --ease-in-out: cubic-bezier(0.45, 0, 0.55, 1);
+
+  /* Z-index ladder */
+  --z-dropdown: 100;
+  --z-sticky: 200;
+  --z-fixed: 300;
+  --z-modal: 400;
+  --z-toast: 500;
+  --z-tooltip: 600;
 }
 
 html {
@@ -36,6 +61,12 @@ body {
   font-variant-numeric: tabular-nums; /* inherits: ALL numbers tabular */
 }
 
+/* Focus ring everywhere — 2px ring + 2px offset, never removed without replacement */
+:focus-visible {
+  outline: 2px solid oklch(0.78 0.145 70 / 0.8);
+  outline-offset: 2px;
+}
+
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
@@ -48,10 +79,122 @@ body {
   background: transparent;
 }
 
-/* Animated gradient underglow for the burning banner */
-@keyframes burn-slide {
-  to {
-    background-position: -200% 0;
+/* ---------------------------------------------------------------------------
+ * Forms (playbook §7): recessed inputs, accent focus ring, error borders
+ * ------------------------------------------------------------------------ */
+
+.field-input {
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  padding: 12px 16px;
+  background: var(--color-raised);
+  color: var(--color-ink);
+  font-size: 16px;
+  box-shadow:
+    inset 0 2px 4px oklch(0 0 0 / 0.15),
+    inset 0 -1px 0 oklch(1 0 0 / 0.05);
+  transition:
+    border-color 150ms var(--ease-out),
+    background-color 150ms var(--ease-out),
+    box-shadow 150ms var(--ease-out);
+}
+.field-input:hover {
+  border-color: var(--color-line-strong);
+}
+.field-input:focus,
+.field-input:focus-visible {
+  outline: none;
+  border-color: var(--color-ember);
+  box-shadow:
+    0 0 0 2px oklch(0.78 0.145 70 / 0.25),
+    inset 0 2px 4px oklch(0 0 0 / 0.15);
+}
+.field-input[aria-invalid="true"] {
+  border-color: var(--color-danger);
+}
+.field-input:disabled {
+  opacity: 0.5;
+}
+/* Hide number-spinner chrome; the unit suffix + min/max carry the affordance */
+.field-input::-webkit-outer-spin-button,
+.field-input::-webkit-inner-spin-button {
+  margin: 0;
+}
+
+/* Toggle: 44×24 track, 20px thumb, 200ms ease-out (playbook §7) */
+.toggle-track {
+  position: relative;
+  width: 44px;
+  height: 24px;
+  flex-shrink: 0;
+  border-radius: 12px;
+  background: var(--color-active);
+  box-shadow: inset 0 1px 2px oklch(0 0 0 / 0.3);
+  transition: background-color 200ms var(--ease-out);
+}
+.toggle-track[aria-checked="true"] {
+  background: var(--color-copper);
+}
+.toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--color-ink);
+  box-shadow: 0 1px 2px oklch(0 0 0 / 0.35);
+  transition: transform 200ms var(--ease-out);
+}
+.toggle-track[aria-checked="true"] .toggle-thumb {
+  transform: translateX(20px);
+}
+
+/* ---------------------------------------------------------------------------
+ * Gauges (playbook §9): recessed 6px track, gradient fill, error tint ≥90%
+ * ------------------------------------------------------------------------ */
+
+.gauge-track {
+  position: relative;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--color-overlay);
+  box-shadow: inset 0 1px 2px oklch(0 0 0 / 0.35);
+  overflow: hidden;
+}
+.gauge-fill,
+.gauge-fill-hot {
+  position: absolute;
+  inset-block: 0;
+  left: 0;
+  border-radius: 3px;
+  transition: width 300ms var(--ease-out);
+}
+.gauge-fill {
+  background: linear-gradient(90deg, var(--color-copper), var(--color-ember));
+}
+.gauge-fill-hot {
+  background: linear-gradient(90deg, var(--color-burn), var(--color-danger));
+  opacity: 0;
+  transition:
+    width 300ms var(--ease-out),
+    opacity 200ms var(--ease-out);
+}
+.gauge-hot .gauge-fill-hot {
+  opacity: 1;
+}
+
+/* ---------------------------------------------------------------------------
+ * Hero moment: BURNING banner underglow — opacity-only breathe, slow + subtle
+ * ------------------------------------------------------------------------ */
+
+@keyframes burn-breathe {
+  0%,
+  100% {
+    opacity: 0.4;
+  }
+  50% {
+    opacity: 0.8;
   }
 }
 .burn-banner {
@@ -61,34 +204,113 @@ body {
 .burn-banner::after {
   content: "";
   position: absolute;
-  inset: -2px;
+  inset: -3px;
   border-radius: inherit;
+  z-index: -1;
   background: linear-gradient(
     100deg,
-    oklch(0.6 0.19 35 / 0.55),
-    oklch(0.78 0.145 70 / 0.55),
-    oklch(0.6 0.19 35 / 0.55)
+    oklch(0.6 0.19 35 / 0.6),
+    oklch(0.78 0.145 70 / 0.6),
+    oklch(0.6 0.19 35 / 0.6)
   );
-  background-size: 200% 100%;
-  animation: burn-slide 2.6s linear infinite;
   filter: blur(8px);
-  z-index: -1;
+  animation: burn-breathe 2.8s var(--ease-in-out) infinite;
 }
 
-/* Running-card pulse */
-@keyframes run-pulse {
-  0%,
-  100% {
-    box-shadow: 0 0 0 0 oklch(0.78 0.145 70 / 0.28);
+/* Running-card pulse — opacity-only ring */
+@keyframes run-ring {
+  0% {
+    opacity: 0.55;
   }
-  70% {
-    box-shadow: 0 0 0 6px oklch(0.78 0.145 70 / 0);
+  70%,
+  100% {
+    opacity: 0;
   }
 }
 .run-pulse {
-  animation: run-pulse 2.2s ease-out infinite;
+  position: relative;
+}
+.run-pulse::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: var(--radius-card);
+  box-shadow: 0 0 0 3px oklch(0.78 0.145 70 / 0.5);
+  opacity: 0;
+  animation: run-ring 2.2s var(--ease-out) infinite;
+  pointer-events: none;
 }
 
-.gauge-fill {
-  transition: width 700ms cubic-bezier(0.3, 0, 0, 1);
+/* ---------------------------------------------------------------------------
+ * Drawer / modal choreography (playbook §6): slide+fade, ease-out in, ease-in out
+ * ------------------------------------------------------------------------ */
+
+@keyframes slide-in-right {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+@keyframes slide-out-right {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes fade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.drawer-enter {
+  animation: slide-in-right 300ms var(--ease-out);
+}
+.drawer-exit {
+  animation: slide-out-right 200ms var(--ease-in) forwards;
+}
+.overlay-enter {
+  animation: fade-in 250ms var(--ease-out);
+}
+.overlay-exit {
+  animation: fade-out 200ms var(--ease-in) forwards;
+}
+.modal-enter {
+  animation: pop-in 250ms var(--ease-out);
+}
+
+/* Reduced motion: near-zero durations (not 0 — keeps animationend firing) */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

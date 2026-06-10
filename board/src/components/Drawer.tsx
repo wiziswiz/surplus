@@ -3,7 +3,11 @@ import { burnNow, getTaskDetail, patchTask } from '../api';
 import type { ConfigDto, ProjectDto, ProviderPref, RunDto, TaskDetailDto } from '../types';
 import { EFFORT_OPTIONS, effectiveModelEffort, fmtDuration, fmtRel, MODEL_OPTIONS } from '../lib';
 import { AttemptDots, ProviderBadge, ScoreRing } from './TaskCard';
+import { SlideOver } from './SlideOver';
 import { useNow } from '../useNow';
+
+const SELECT_CLS =
+  'rounded-chip border border-line bg-overlay px-2 py-1.5 text-xs text-ink outline-none transition-colors duration-150 hover:border-line-strong focus:border-ember';
 
 export function Drawer({
   taskId,
@@ -63,188 +67,214 @@ export function Drawer({
 
   const task = detail?.task;
   const project = task ? projects.find((p) => p.id === task.projectId) : undefined;
-  const defaults = task ? effectiveModelEffort({ ...task, model: null, effort: null }, config) : null;
+  const defaults = task
+    ? effectiveModelEffort({ ...task, model: null, effort: null }, config)
+    : null;
 
   return (
-    <>
-      <div className="fixed inset-0 z-20 bg-black/50" onClick={onClose} />
-      <aside className="fixed inset-y-0 right-0 z-30 flex w-[440px] flex-col gap-4 overflow-y-auto bg-raised p-5 ring-1 ring-line">
-        {!task ? (
-          <p className="text-sm text-dim">{err ?? 'Loading…'}</p>
-        ) : (
-          <>
-            <div className="flex items-start justify-between gap-3">
-              <input
-                value={title}
-                onChange={(e) => {
-                  setTitle(e.target.value);
-                  setDirty(true);
-                }}
-                className="w-full bg-transparent text-base font-semibold text-ink outline-none focus:border-b focus:border-line"
-              />
-              <button
-                onClick={onClose}
-                aria-label="close"
-                className="rounded-chip px-1.5 text-dim hover:text-ink"
-              >
-                ✕
-              </button>
-            </div>
+    <SlideOver label={task ? `Task: ${task.title}` : 'Task details'} onClose={onClose}>
+      {(close) => (
+        <div className="flex flex-col gap-4 p-6">
+          {!task ? (
+            <p className="text-sm text-dim">{err ?? 'Loading…'}</p>
+          ) : (
+            <>
+              <div className="flex items-start justify-between gap-3">
+                <input
+                  value={title}
+                  onChange={(e) => {
+                    setTitle(e.target.value);
+                    setDirty(true);
+                  }}
+                  aria-label="Task title"
+                  className="w-full border-b border-transparent bg-transparent text-base font-semibold text-ink outline-none transition-colors duration-150 focus:border-line-strong"
+                />
+                <button
+                  onClick={close}
+                  aria-label="Close task details"
+                  className="rounded-chip px-2 py-1 text-dim transition-colors duration-150 hover:bg-overlay hover:text-ink"
+                >
+                  ✕
+                </button>
+              </div>
 
-            <div className="flex flex-wrap items-center gap-1.5 text-xs">
-              {project && (
-                <span className="rounded-chip bg-overlay px-1.5 py-0.5 text-dim">
-                  {project.name}
+              <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                {project && (
+                  <span className="rounded-chip bg-overlay px-1.5 py-0.5 text-dim">
+                    {project.name}
+                  </span>
+                )}
+                <span className="rounded-chip bg-overlay px-1.5 py-0.5 uppercase tracking-[0.08em] text-faint">
+                  {task.status}
                 </span>
-              )}
-              <span className="rounded-chip bg-overlay px-1.5 py-0.5 uppercase tracking-wider text-faint">
-                {task.status}
-              </span>
-              <AttemptDots attempts={task.attempts} max={task.maxAttempts} />
-            </div>
+                <AttemptDots attempts={task.attempts} max={task.maxAttempts} />
+              </div>
 
-            <div className="grid grid-cols-2 gap-3">
-              <label className="flex flex-col gap-1 text-[11px] text-faint">
-                provider
-                <select
-                  value={task.provider}
-                  onChange={(e) => void apply({ provider: e.target.value as ProviderPref })}
-                  className="rounded-chip bg-overlay px-2 py-1 text-xs text-ink outline-none"
-                >
-                  <option value="any">any</option>
-                  <option value="claude">claude</option>
-                  <option value="codex">codex</option>
-                </select>
-              </label>
-              <label className="flex flex-col gap-1 text-[11px] text-faint">
-                priority (lower = sooner)
-                <span className="flex items-center gap-1">
-                  <button
-                    onClick={() => void apply({ priority: task.priority - 10 })}
-                    className="rounded-chip bg-overlay px-2 py-1 text-xs text-dim hover:text-ink"
+              <div className="grid grid-cols-2 gap-3">
+                <label className="flex flex-col gap-1 text-[11px] text-faint">
+                  provider
+                  <select
+                    value={task.provider}
+                    onChange={(e) => void apply({ provider: e.target.value as ProviderPref })}
+                    className={SELECT_CLS}
                   >
-                    −
-                  </button>
-                  <span className="w-10 text-center text-xs text-ink">{task.priority}</span>
-                  <button
-                    onClick={() => void apply({ priority: task.priority + 10 })}
-                    className="rounded-chip bg-overlay px-2 py-1 text-xs text-dim hover:text-ink"
+                    <option value="any">any</option>
+                    <option value="claude">claude</option>
+                    <option value="codex">codex</option>
+                  </select>
+                </label>
+                <div className="flex flex-col gap-1 text-[11px] text-faint">
+                  priority (lower = sooner)
+                  <span className="flex items-center gap-1">
+                    <button
+                      onClick={() => void apply({ priority: task.priority - 10 })}
+                      aria-label="Raise priority"
+                      className="rounded-chip bg-overlay px-2.5 py-1.5 text-xs text-dim transition-colors duration-150 hover:bg-active hover:text-ink"
+                    >
+                      −
+                    </button>
+                    <span className="w-10 text-center text-xs text-ink">{task.priority}</span>
+                    <button
+                      onClick={() => void apply({ priority: task.priority + 10 })}
+                      aria-label="Lower priority"
+                      className="rounded-chip bg-overlay px-2.5 py-1.5 text-xs text-dim transition-colors duration-150 hover:bg-active hover:text-ink"
+                    >
+                      +
+                    </button>
+                  </span>
+                </div>
+                <label className="flex flex-col gap-1 text-[11px] text-faint">
+                  model
+                  <select
+                    value={task.model ?? ''}
+                    onChange={(e) => void apply({ model: e.target.value || null })}
+                    className={SELECT_CLS}
                   >
-                    +
-                  </button>
-                </span>
-              </label>
-              <label className="flex flex-col gap-1 text-[11px] text-faint">
-                model
-                <select
-                  value={task.model ?? ''}
-                  onChange={(e) => void apply({ model: e.target.value || null })}
-                  className="rounded-chip bg-overlay px-2 py-1 text-xs text-ink outline-none"
-                >
-                  <option value="">default{defaults ? ` (${defaults.model})` : ''}</option>
-                  {MODEL_OPTIONS[task.provider].map((m) => (
-                    <option key={m} value={m}>
-                      {m}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="flex flex-col gap-1 text-[11px] text-faint">
-                effort
-                <select
-                  value={task.effort ?? ''}
-                  onChange={(e) => void apply({ effort: e.target.value || null })}
-                  className="rounded-chip bg-overlay px-2 py-1 text-xs text-ink outline-none"
-                >
-                  <option value="">default{defaults ? ` (${defaults.effort})` : ''}</option>
-                  {EFFORT_OPTIONS.map((m) => (
-                    <option key={m} value={m}>
-                      {m}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
+                    <option value="">default{defaults ? ` (${defaults.model})` : ''}</option>
+                    {MODEL_OPTIONS[task.provider].map((m) => (
+                      <option key={m} value={m}>
+                        {m}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="flex flex-col gap-1 text-[11px] text-faint">
+                  effort
+                  <select
+                    value={task.effort ?? ''}
+                    onChange={(e) => void apply({ effort: e.target.value || null })}
+                    className={SELECT_CLS}
+                  >
+                    <option value="">default{defaults ? ` (${defaults.effort})` : ''}</option>
+                    {EFFORT_OPTIONS.map((m) => (
+                      <option key={m} value={m}>
+                        {m}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
 
-            <label className="flex flex-col gap-1 text-[11px] text-faint">
-              body (appended to the goal condition)
-              <textarea
-                value={body}
-                onChange={(e) => {
-                  setBody(e.target.value);
-                  setDirty(true);
-                }}
-                rows={7}
-                className="resize-y rounded-card bg-overlay p-3 text-sm leading-relaxed text-ink outline-none focus:ring-1 focus:ring-ember/30"
-              />
-            </label>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => {
-                  void apply({ title: title.trim() || task.title, body }).then(() =>
-                    setDirty(false),
-                  );
-                }}
-                disabled={!dirty}
-                className="rounded-chip bg-overlay px-3 py-1 text-xs font-medium text-ink disabled:text-faint"
-              >
-                Save
-              </button>
-              <button
-                onClick={async () => {
-                  setBusy(true);
-                  setErr(null);
-                  try {
-                    await burnNow(task.id);
-                  } catch (e) {
-                    setErr(e instanceof Error ? e.message : 'burn failed');
-                  } finally {
-                    setBusy(false);
+              <label className="flex flex-col gap-1 text-[11px] text-faint">
+                body (appended to the goal condition)
+                <textarea
+                  value={body}
+                  onChange={(e) => {
+                    setBody(e.target.value);
+                    setDirty(true);
+                  }}
+                  rows={7}
+                  className="field-input resize-y text-sm leading-relaxed"
+                />
+              </label>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => {
+                    void apply({ title: title.trim() || task.title, body }).then(() =>
+                      setDirty(false),
+                    );
+                  }}
+                  disabled={!dirty}
+                  className="rounded-chip bg-overlay px-3 py-1.5 text-xs font-medium text-ink transition-colors duration-150 hover:bg-active disabled:text-faint disabled:hover:bg-overlay"
+                >
+                  Save
+                </button>
+                <button
+                  onClick={async () => {
+                    setBusy(true);
+                    setErr(null);
+                    try {
+                      // The server replies 200 even when nothing was claimed
+                      // (non-ready task, pacing, pause race) — surface it.
+                      const res = await burnNow(task.id);
+                      if ((res.result?.launched ?? 0) === 0) {
+                        setErr(
+                          "nothing dispatched — task must be 'ready' and the provider available (not paused or pacing)",
+                        );
+                      }
+                    } catch (e) {
+                      setErr(e instanceof Error ? e.message : 'burn failed');
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                  disabled={busy || task.status !== 'ready'}
+                  title={
+                    task.status !== 'ready'
+                      ? `only 'ready' tasks can be burned (this one is '${task.status}')`
+                      : undefined
                   }
-                }}
-                disabled={busy || task.status === 'running'}
-                className="burn-banner rounded-chip bg-ember/20 px-3 py-1 text-xs font-semibold text-ember hover:bg-ember/30 disabled:opacity-50"
-              >
-                {busy ? 'Igniting…' : 'Burn now'}
-              </button>
-              <span className="flex-1" />
-              <button
-                onClick={() => {
-                  void apply({ status: 'archived' }).then(onClose);
-                }}
-                className="rounded-chip px-2 py-1 text-xs text-faint hover:text-danger"
-              >
-                Archive
-              </button>
-            </div>
-            {err && <p className="text-xs text-danger">{err}</p>}
+                  className="burn-banner rounded-chip bg-ember/20 px-3 py-1.5 text-xs font-semibold text-ember transition-colors duration-150 hover:bg-ember/30 disabled:opacity-50"
+                >
+                  {busy ? 'Igniting…' : 'Burn now'}
+                </button>
+                <span className="flex-1" />
+                <button
+                  onClick={() => {
+                    void apply({ status: 'archived' }).then(close);
+                  }}
+                  className="rounded-chip px-2 py-1.5 text-xs text-faint transition-colors duration-150 hover:text-danger"
+                >
+                  Archive
+                </button>
+              </div>
+              {err && (
+                <p role="alert" className="text-xs text-danger">
+                  {err}
+                </p>
+              )}
 
-            {task.judgeFeedback && (
-              <section className="flex flex-col gap-1">
-                <h3 className="text-[11px] uppercase tracking-widest text-faint">
-                  judge feedback
+              {task.judgeFeedback && (
+                <section className="flex flex-col gap-1">
+                  <h3 className="text-[11px] uppercase tracking-[0.12em] text-faint">
+                    judge feedback
+                  </h3>
+                  <pre className="whitespace-pre-wrap rounded-card bg-overlay p-3 font-sans text-xs leading-relaxed text-dim">
+                    {task.judgeFeedback}
+                  </pre>
+                </section>
+              )}
+
+              <section className="flex flex-col gap-2">
+                <h3 className="text-[11px] uppercase tracking-[0.12em] text-faint">
+                  run history ({detail.runs.length})
                 </h3>
-                <pre className="whitespace-pre-wrap rounded-card bg-overlay p-3 text-xs leading-relaxed text-dim">
-                  {task.judgeFeedback}
-                </pre>
+                {detail.runs.length === 0 && (
+                  <p className="rounded-card border border-dashed border-line px-3 py-4 text-center text-xs text-faint">
+                    no runs yet — "Burn now" dispatches outside the schedule
+                  </p>
+                )}
+                {[...detail.runs]
+                  .sort((a, b) => b.startedAt - a.startedAt)
+                  .map((run) => (
+                    <RunItem key={run.id} run={run} />
+                  ))}
               </section>
-            )}
-
-            <section className="flex flex-col gap-2">
-              <h3 className="text-[11px] uppercase tracking-widest text-faint">
-                run history ({detail.runs.length})
-              </h3>
-              {detail.runs.length === 0 && <p className="text-xs text-faint">no runs yet</p>}
-              {[...detail.runs]
-                .sort((a, b) => b.startedAt - a.startedAt)
-                .map((run) => (
-                  <RunItem key={run.id} run={run} />
-                ))}
-            </section>
-          </>
-        )}
-      </aside>
-    </>
+            </>
+          )}
+        </div>
+      )}
+    </SlideOver>
   );
 }
 
@@ -261,8 +291,8 @@ function RunItem({ run }: { run: RunDto }) {
   const now = useNow(30_000);
   const [copied, setCopied] = useState(false);
   return (
-    <details className="rounded-card bg-overlay px-3 py-2">
-      <summary className="flex cursor-pointer list-none items-center gap-2 text-xs">
+    <details className="rounded-card bg-overlay px-3 py-2 shadow-sm">
+      <summary className="flex cursor-pointer list-none items-center gap-2 rounded-chip text-xs">
         {run.provider && <ProviderBadge pref={run.provider} />}
         <span
           className={`rounded-chip px-1.5 py-0.5 text-[10px] font-medium ${
@@ -290,7 +320,7 @@ function RunItem({ run }: { run: RunDto }) {
                   window.setTimeout(() => setCopied(false), 1500);
                 });
               }}
-              className="rounded-chip px-1.5 py-0.5 text-[10px] text-faint hover:text-ink"
+              className="rounded-chip px-1.5 py-0.5 text-[10px] text-faint transition-colors duration-150 hover:text-ink"
             >
               {copied ? 'copied' : 'copy'}
             </button>
@@ -299,13 +329,13 @@ function RunItem({ run }: { run: RunDto }) {
         {run.summary && <p className="whitespace-pre-wrap leading-relaxed">{run.summary}</p>}
         {run.judgeReasons && (
           <div>
-            <h4 className="text-[10px] uppercase tracking-widest text-faint">judge reasons</h4>
+            <h4 className="text-[10px] uppercase tracking-[0.12em] text-faint">judge reasons</h4>
             <p className="whitespace-pre-wrap leading-relaxed">{run.judgeReasons}</p>
           </div>
         )}
         {run.judgeMissing && (
           <div>
-            <h4 className="text-[10px] uppercase tracking-widest text-faint">missing</h4>
+            <h4 className="text-[10px] uppercase tracking-[0.12em] text-faint">missing</h4>
             <p className="whitespace-pre-wrap leading-relaxed">{run.judgeMissing}</p>
           </div>
         )}
