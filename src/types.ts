@@ -373,8 +373,12 @@ export interface RunTaskArgs {
 
 export interface ProviderAdapter {
   provider: Provider;
-  /** Live usage snapshot; null when this provider has no credentials/CLI. */
-  getUsage(): Promise<UsageSnapshot | null>;
+  /**
+   * Live usage snapshot; null when this provider has no credentials/CLI.
+   * `fresh: true` (manual refresh) narrows the success-cache window to a
+   * 30s floor — it never overrides an active 429 backoff.
+   */
+  getUsage(opts?: { fresh?: boolean }): Promise<UsageSnapshot | null>;
   /** Execute one work session in a worktree; outcome 'failed' = completed-pending-judge. */
   runTask(args: RunTaskArgs): Promise<RunnerResult>;
 }

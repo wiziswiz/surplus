@@ -377,7 +377,7 @@ export async function startServer(opts: StartServerOptions): Promise<void> {
 
   // --- shared state builders ------------------------------------------------
 
-  async function buildState(): Promise<ApiState> {
+  async function buildState(opts?: { fresh?: boolean }): Promise<ApiState> {
     const usage: ApiState['usage'] = {};
     const decisions: ApiState['decisions'] = {};
     const now = Date.now();
@@ -387,7 +387,9 @@ export async function startServer(opts: StartServerOptions): Promise<void> {
       if (!adapter) continue;
       let snap: UsageSnapshot | null = null;
       try {
-        snap = await adapter.getUsage(); // adapter caches internally
+        // Adapter caches internally; fresh narrows the cache window to a 30s
+        // floor (never overrides 429 backoff) for the board's refresh button.
+        snap = await adapter.getUsage(opts?.fresh ? { fresh: true } : undefined);
       } catch {
         snap = null;
       }
@@ -424,7 +426,9 @@ export async function startServer(opts: StartServerOptions): Promise<void> {
 
   // --- state ------------------------------------------------------------------
 
-  app.get('/api/state', async (c) => c.json(await buildState()));
+  app.get('/api/state', async (c) =>
+    c.json(await buildState({ fresh: c.req.query('fresh') === '1' })),
+  );
 
   // --- projects ---------------------------------------------------------------
 

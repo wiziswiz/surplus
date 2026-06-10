@@ -27,7 +27,8 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
-export const getState = () => api<StateDto>('/api/state');
+export const getState = (fresh = false) =>
+  api<StateDto>(fresh ? '/api/state?fresh=1' : '/api/state');
 export const getProjects = () => api<ProjectDto[]>('/api/projects');
 export const getTasks = () => api<TaskDto[]>('/api/tasks');
 export const getTaskDetail = (id: string) => api<TaskDetailDto>(`/api/tasks/${id}`);

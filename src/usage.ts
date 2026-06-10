@@ -53,7 +53,15 @@ export interface GetUsageOverrides {
   /** Credential source; default readCredentials() (keychain + file). */
   readCredentialsImpl?: (now: number) => OAuthCredentials | null;
   env?: NodeJS.ProcessEnv;
+  /**
+   * Accept cached success data only up to this age (ms) — a manual-refresh
+   * hook. Floored at MIN_MAX_AGE_MS (30s) so a refresh button can't hammer
+   * the rate-limited endpoint, and NEVER overrides an active 429 backoff.
+   */
+  maxAgeMs?: number;
 }
+
+export const MIN_MAX_AGE_MS = 30_000;
 
 // ---------------------------------------------------------------------------
 // Pure helpers (exported for tests)
@@ -186,9 +194,10 @@ function isFreshEnough(stored: StoredSnapshot, now: number): boolean {
 }
 
 /** Snapshot to serve without refetching, or null when a refetch is due. */
-function serveFromCache(cache: CacheFile, now: number): UsageSnapshot | null {
+function serveFromCache(cache: CacheFile, now: number, maxAgeMs?: number): UsageSnapshot | null {
   const retryUntil = getRateLimitedRetryUntil(cache);
   if (retryUntil !== null) {
+    // 429 backoff is non-negotiable — maxAgeMs cannot force through it.
     if (now >= retryUntil) return null; // backoff elapsed -> refetch
     if (cache.lastGoodData && isFreshEnough(cache.lastGoodData, now)) {
       return { ...hydrate(cache.lastGoodData), error: 'rate-limited', unavailable: false };
@@ -197,7 +206,10 @@ function serveFromCache(cache: CacheFile, now: number): UsageSnapshot | null {
     // rather than burning on frozen numbers.
     return hydrate(cache.data);
   }
-  const ttl = cache.data.unavailable ? CACHE_FAILURE_TTL_MS : CACHE_TTL_MS;
+  let ttl = cache.data.unavailable ? CACHE_FAILURE_TTL_MS : CACHE_TTL_MS;
+  if (maxAgeMs !== undefined) {
+    ttl = Math.min(ttl, Math.max(MIN_MAX_AGE_MS, maxAgeMs));
+  }
   return now - cache.timestamp < ttl ? hydrate(cache.data) : null;
 }
 
@@ -271,7 +283,7 @@ export async function getUsage(overrides: GetUsageOverrides = {}): Promise<Usage
 
   const cache = readCacheFile(cachePath);
   if (cache) {
-    const served = serveFromCache(cache, now);
+    const served = serveFromCache(cache, now, overrides.maxAgeMs);
     if (served) return served;
   }
 

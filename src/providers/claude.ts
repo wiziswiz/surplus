@@ -19,7 +19,8 @@ export function claudeAdapter(config: SurplusConfig): ProviderAdapter {
   void config; // adapter is config-shaped for symmetry with codex; runner gets config via RunTaskArgs
   return {
     provider: 'claude',
-    getUsage: async (): Promise<UsageSnapshot | null> => getUsage(),
+    getUsage: async (opts?: { fresh?: boolean }): Promise<UsageSnapshot | null> =>
+      getUsage(opts?.fresh ? { maxAgeMs: 0 } : {}),
     runTask: (args: RunTaskArgs): Promise<RunnerResult> => runTask(args),
   };
 }

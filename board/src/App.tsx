@@ -55,6 +55,21 @@ export default function App() {
     }
   }, []);
 
+  // Manual usage refresh: bypasses the server's 5-min usage cache (30s floor;
+  // never overrides 429 backoff). Cooldown mirrors that floor client-side.
+  const [refreshState, setRefreshState] = useState<'idle' | 'busy' | 'cooldown'>('idle');
+  const refreshUsage = useCallback(async () => {
+    setRefreshState('busy');
+    try {
+      const s = await getState(true);
+      setState(s);
+      setRefreshState('cooldown');
+      window.setTimeout(() => setRefreshState('idle'), 30_000);
+    } catch {
+      setRefreshState('idle');
+    }
+  }, []);
+
   // Initial load + periodic state fallback.
   useEffect(() => {
     void refreshAll();
@@ -177,6 +192,8 @@ export default function App() {
         onTogglePause={togglePause}
         onAddProject={() => setShowAddProject(true)}
         onOpenSettings={() => setShowSettings(true)}
+        onRefreshUsage={() => void refreshUsage()}
+        refreshState={refreshState}
       />
       <Board
         tasks={tasks}

@@ -2,16 +2,22 @@ import type { DecisionDto, Provider, StateDto, UsageDto } from '../types';
 import { fmtCountdown, fmtRel } from '../lib';
 import { useNow } from '../useNow';
 
+export type RefreshState = 'idle' | 'busy' | 'cooldown';
+
 export function Header({
   state,
   onTogglePause,
   onAddProject,
   onOpenSettings,
+  onRefreshUsage,
+  refreshState,
 }: {
   state: StateDto | null;
   onTogglePause: () => void;
   onAddProject: () => void;
   onOpenSettings: () => void;
+  onRefreshUsage: () => void;
+  refreshState: RefreshState;
 }) {
   const paused = state?.paused ?? false;
   // ApiState contract: a provider's usage key is ABSENT when it is disabled —
@@ -57,6 +63,8 @@ export function Header({
             provider="claude"
             usage={state?.usage.claude ?? null}
             decision={state?.decisions.claude}
+            onRefreshUsage={onRefreshUsage}
+            refreshState={refreshState}
           />
         )}
         {showCodex && (
@@ -64,10 +72,32 @@ export function Header({
             provider="codex"
             usage={state?.usage.codex ?? null}
             decision={state?.decisions.codex}
+            onRefreshUsage={onRefreshUsage}
+            refreshState={refreshState}
           />
         )}
       </div>
     </header>
+  );
+}
+
+function RefreshIcon({ spinning }: { spinning: boolean }) {
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      className={spinning ? 'animate-spin' : undefined}
+    >
+      <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+      <path d="M21 3v6h-6" />
+    </svg>
   );
 }
 
@@ -95,10 +125,14 @@ function ProviderPanel({
   provider,
   usage,
   decision,
+  onRefreshUsage,
+  refreshState,
 }: {
   provider: Provider;
   usage: UsageDto | null;
   decision?: DecisionDto;
+  onRefreshUsage: () => void;
+  refreshState: RefreshState;
 }) {
   const now = useNow(1000);
   const accent = provider === 'claude' ? 'text-ember' : 'text-jade';
@@ -120,8 +154,21 @@ function ProviderPanel({
         )}
         <DecisionBanner decision={decision} />
         {usage && !usage.unavailable && (
-          <span className="ml-auto shrink-0 text-xs text-faint">
+          <span className="ml-auto flex shrink-0 items-center gap-1.5 text-xs text-faint">
             updated {fmtRel(usage.fetchedAt, now)}
+            <button
+              onClick={onRefreshUsage}
+              disabled={refreshState !== 'idle'}
+              aria-label="Refresh usage now"
+              title={
+                refreshState === 'cooldown'
+                  ? 'Refreshed — available again in a moment'
+                  : 'Refresh usage now'
+              }
+              className="rounded-chip p-1 text-faint transition-colors duration-150 hover:bg-active hover:text-ink disabled:cursor-default disabled:opacity-40"
+            >
+              <RefreshIcon spinning={refreshState === 'busy'} />
+            </button>
           </span>
         )}
       </div>

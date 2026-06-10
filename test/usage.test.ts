@@ -370,6 +370,36 @@ describe('getUsage', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it('maxAgeMs narrows the success cache window, floored at 30s', async () => {
+    await callGetUsage();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // 10s-old cache: maxAgeMs 0 is floored to 30s -> still served.
+    clock = NOW + 10_000;
+    const served = await callGetUsage({ maxAgeMs: 0 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(served?.fetchedAt).toBe(NOW);
+
+    // 31s-old cache: past the floor -> refetches even though 5min TTL remains.
+    clock = NOW + 31_000;
+    const fresh = await callGetUsage({ maxAgeMs: 0 });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fresh?.fetchedAt).toBe(NOW + 31_000);
+  });
+
+  it('maxAgeMs never overrides an active 429 backoff', async () => {
+    await callGetUsage(); // seed lastGoodData
+    fetchMock.mockResolvedValue(jsonResponse({}, { status: 429 }));
+    clock = NOW + 6 * 60_000;
+    await callGetUsage(); // trips backoff (60s)
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    // Inside the backoff window a forced refresh must NOT hit the API again.
+    clock = NOW + 6 * 60_000 + 31_000;
+    await callGetUsage({ maxAgeMs: 0 });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it('caches failures for 15 seconds with an http error tag', async () => {
     fetchMock.mockResolvedValue(jsonResponse({}, { status: 500 }));
 
