@@ -27,6 +27,7 @@ export function Board({
   scores,
   heartbeats,
   onOpen,
+  onOpenProject,
   onMove,
   onAddTask,
   onArchive,
@@ -38,6 +39,7 @@ export function Board({
   scores: Record<string, number>;
   heartbeats: Record<string, string>;
   onOpen: (id: string) => void;
+  onOpenProject: (id: string) => void;
   onMove: (id: string, status: TaskStatus) => void;
   onAddTask: (projectId: string, title: string, status: TaskStatus) => Promise<void>;
   onArchive: (id: string) => void;
@@ -79,6 +81,7 @@ export function Board({
           scores={scores}
           heartbeats={heartbeats}
           onOpen={onOpen}
+          onOpenProject={onOpenProject}
           onMove={onMove}
           onAddTask={onAddTask}
           onArchive={onArchive}
@@ -97,6 +100,7 @@ function Column({
   scores,
   heartbeats,
   onOpen,
+  onOpenProject,
   onMove,
   onAddTask,
   onArchive,
@@ -109,6 +113,7 @@ function Column({
   scores: Record<string, number>;
   heartbeats: Record<string, string>;
   onOpen: (id: string) => void;
+  onOpenProject: (id: string) => void;
   onMove: (id: string, status: TaskStatus) => void;
   onAddTask: (projectId: string, title: string, status: TaskStatus) => Promise<void>;
   onArchive: (id: string) => void;
@@ -158,6 +163,7 @@ function Column({
             score={scores[t.id]}
             heartbeat={heartbeats[t.id]}
             onOpen={onOpen}
+            onOpenProject={onOpenProject}
             onMove={onMove}
             onArchive={onArchive}
           />

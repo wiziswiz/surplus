@@ -39,6 +39,7 @@ import { judgeRun } from './judge.js';
 import { startServer, applyConfigPatch } from './server.js';
 import type { ServerDb, ConfigPatch } from './server.js';
 import {
+  boardPlistPath,
   installBoardLaunchd,
   installDockApp,
   installLaunchd,
@@ -328,6 +329,8 @@ function toServerDb(db: SurplusDb): ServerDb {
         createdAt: row.createdAt,
       });
     },
+    updateProject: (id, patch) => db.updateProject(id, patch),
+    deleteProject: (id) => db.deleteProject(id),
     updateTask: (id, patch) => db.updateTask(id, patch as TaskPatch),
     listRuns: (taskId) => db.listRunsForTask(taskId),
     listEventsForTask: (taskId, limit = 200) => {
@@ -773,6 +776,13 @@ program
             status: () => existsSync(launchdPlistPath()),
             setArmed: (on: boolean) =>
               on ? (installLaunchd({ intervalMinutes: 15 }), true) : uninstallLaunchd(),
+          },
+          boardService: {
+            status: () => existsSync(boardPlistPath()),
+            install: () => {
+              installBoardLaunchd({ port: deps.config.board.port });
+              installDockApp({ port: deps.config.board.port });
+            },
           },
         },
       });

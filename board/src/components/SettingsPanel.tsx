@@ -1,7 +1,7 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
-import { patchConfig } from '../api';
-import type { ConfigDto, ConfigPatchDto } from '../types';
+import { getBoardService, installBoardService, patchConfig } from '../api';
+import type { BoardServiceDto, ConfigDto, ConfigPatchDto } from '../types';
 import { EFFORT_OPTIONS, MODEL_OPTIONS } from '../lib';
 import { SlideOver } from './SlideOver';
 
@@ -305,6 +305,66 @@ function SelectField({
 }
 
 // ---------------------------------------------------------------------------
+// Service: the always-on dashboard launchd agent (install-only — uninstalling
+// the service that keeps this page alive is CLI-only by design). Hidden when
+// the server reports available:false.
+// ---------------------------------------------------------------------------
+
+function ServiceSection() {
+  const [service, setService] = useState<BoardServiceDto | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    getBoardService()
+      .then(setService)
+      .catch(() => setService(null));
+  }, []);
+
+  if (!service?.available) return null;
+
+  const install = async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      await installBoardService();
+      setService(await getBoardService());
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'install failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Section title="Service">
+      <div className="flex items-center gap-3" aria-live="polite">
+        {service.installed ? (
+          <p className="text-sm font-medium text-jade">Always-on dashboard: installed ✓</p>
+        ) : (
+          <button
+            onClick={() => void install()}
+            disabled={busy}
+            className="rounded-chip bg-ember/20 px-3 py-1.5 text-xs font-semibold text-ember transition-colors duration-150 hover:bg-ember/30 disabled:opacity-50"
+          >
+            {busy ? 'Installing…' : 'Install'}
+          </button>
+        )}
+      </div>
+      <p className="-mt-2 max-w-xs text-xs leading-relaxed text-faint">
+        Keeps this dashboard running at login and restarts it if it dies. Also installs the
+        Dock app.
+      </p>
+      {err && (
+        <p role="alert" className="text-xs text-danger">
+          {err}
+        </p>
+      )}
+    </Section>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Panel
 // ---------------------------------------------------------------------------
 
@@ -540,6 +600,8 @@ export function SettingsPanel({
                 {num('judgePassScore', 'Pass score', '/ 5', 'Judge score at or above which a run counts as done.')}
               </div>
             </Section>
+
+            <ServiceSection />
           </div>
 
           <div className="sticky bottom-0 mt-auto flex items-center gap-3 border-t border-line bg-raised px-6 py-4">

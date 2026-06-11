@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import {
@@ -44,6 +44,23 @@ function makeDb(): FakeDb {
     listProjects: () => [...projects.values()],
     getProject: (id) => projects.get(id),
     insertProject: (r) => void projects.set(r.id, r),
+    updateProject: (id, patch) => {
+      const p = projects.get(id);
+      if (!p) return undefined;
+      const u = { ...p, ...patch };
+      projects.set(id, u);
+      return u;
+    },
+    deleteProject: (id) => {
+      const live = [...tasks.values()].filter(
+        (t) => t.projectId === id && t.status !== 'archived',
+      );
+      if (live.length > 0) {
+        throw new Error(`project '${id}' has ${live.length} non-archived task(s)`);
+      }
+      for (const [tid, t] of tasks) if (t.projectId === id) tasks.delete(tid);
+      return projects.delete(id);
+    },
     listTasks: (status) =>
       [...tasks.values()].filter((t) => (status ? t.status === status : t.status !== 'archived')),
     getTask: (id) => tasks.get(id),
@@ -213,15 +230,27 @@ const burnCalls: Array<[string | undefined, Provider | undefined]> = [];
 const serverConfig = makeConfig();
 const configPatches: unknown[] = [];
 let tmpRepo: string;
+let tmpVision: string;
 
 beforeAll(async () => {
   tmpRepo = mkdtempSync(path.join(tmpdir(), 'surplus-board-test-'));
   mkdirSync(path.join(tmpRepo, '.git'));
+  tmpVision = mkdtempSync(path.join(tmpdir(), 'surplus-vision-test-'));
   db.insertProject({
     id: 'demo',
     name: 'demo',
     path: '/tmp/demo',
     visionPath: '/tmp/demo/VISION.md',
+    provider: 'any',
+    model: null,
+    effort: null,
+    createdAt: Date.now(),
+  });
+  db.insertProject({
+    id: 'visproj',
+    name: 'visproj',
+    path: tmpVision,
+    visionPath: path.join(tmpVision, 'VISION.md'),
     provider: 'any',
     model: null,
     effort: null,
@@ -255,6 +284,7 @@ beforeAll(async () => {
 afterAll(() => {
   ac.abort();
   rmSync(tmpRepo, { recursive: true, force: true });
+  rmSync(tmpVision, { recursive: true, force: true });
 });
 
 describe('GET /api/state', () => {
@@ -390,6 +420,188 @@ describe('projects', () => {
       body: JSON.stringify({ name: 'fresh-idea' }),
     });
     expect(res.status).toBe(501);
+  });
+});
+
+describe('project vision', () => {
+  it('GET returns empty markdown when VISION.md is missing, 404 for unknown projects', async () => {
+    const missing = await fetch(`${BASE}/api/projects/visproj/vision`);
+    expect(missing.status).toBe(200);
+    expect(await missing.json()).toEqual({ markdown: '' });
+    const unknown = await fetch(`${BASE}/api/projects/nope/vision`);
+    expect(unknown.status).toBe(404);
+    const badId = await fetch(`${BASE}/api/projects/a.b/vision`);
+    expect(badId.status).toBe(400);
+  });
+
+  it('PUT writes the file and GET round-trips it', async () => {
+    const markdown = '# Vision\n\n- ship the thing\n';
+    const put = await fetch(`${BASE}/api/projects/visproj/vision`, {
+      method: 'PUT',
+      body: JSON.stringify({ markdown }),
+    });
+    expect(put.status).toBe(200);
+    expect(await put.json()).toEqual({ ok: true });
+    expect(readFileSync(path.join(tmpVision, 'VISION.md'), 'utf8')).toBe(markdown);
+    const get = await fetch(`${BASE}/api/projects/visproj/vision`);
+    expect(((await get.json()) as { markdown: string }).markdown).toBe(markdown);
+  });
+
+  it('PUT rejects oversized and non-string markdown with 400', async () => {
+    const big = await fetch(`${BASE}/api/projects/visproj/vision`, {
+      method: 'PUT',
+      body: JSON.stringify({ markdown: 'x'.repeat(64_001) }),
+    });
+    expect(big.status).toBe(400);
+    const nonString = await fetch(`${BASE}/api/projects/visproj/vision`, {
+      method: 'PUT',
+      body: JSON.stringify({ markdown: 42 }),
+    });
+    expect(nonString.status).toBe(400);
+  });
+});
+
+describe('PATCH /api/projects/:id', () => {
+  it('applies allowed fields (model/effort accept null = inherit)', async () => {
+    const res = await fetch(`${BASE}/api/projects/visproj`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name: 'Vision Proj', provider: 'claude', model: 'opus', effort: null }),
+    });
+    expect(res.status).toBe(200);
+    const row = (await res.json()) as ProjectRow;
+    expect(row.name).toBe('Vision Proj');
+    expect(row.provider).toBe('claude');
+    expect(row.model).toBe('opus');
+    expect(row.effort).toBeNull();
+  });
+
+  it('rejects bad fields, empty patches, and unknown projects', async () => {
+    const bads = [
+      { name: '   ' },
+      { provider: 'gpt' },
+      { model: '' },
+      { effort: 42 },
+      { path: '/etc' }, // not patchable → empty patch
+      {},
+    ];
+    for (const body of bads) {
+      const res = await fetch(`${BASE}/api/projects/visproj`, {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      });
+      expect(res.status).toBe(400);
+    }
+    const unknown = await fetch(`${BASE}/api/projects/nope`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name: 'x' }),
+    });
+    expect(unknown.status).toBe(404);
+  });
+});
+
+describe('DELETE /api/projects/:id', () => {
+  function seedTask(id: string, projectId: string, status: TaskRow['status']): void {
+    const now = Date.now();
+    db.insertTask({
+      id,
+      projectId,
+      title: 'doomed',
+      body: '',
+      status,
+      priority: 100,
+      attempts: 0,
+      maxAttempts: 3,
+      provider: 'any',
+      model: null,
+      effort: null,
+      judgeFeedback: null,
+      parentId: null,
+      scheduledAt: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  it('refuses with 400 while non-archived tasks exist, succeeds after archiving', async () => {
+    db.insertProject({
+      id: 'delme',
+      name: 'delme',
+      path: '/tmp/delme',
+      visionPath: '/tmp/delme/VISION.md',
+      provider: 'any',
+      model: null,
+      effort: null,
+      createdAt: Date.now(),
+    });
+    seedTask('t_del1', 'delme', 'ready');
+    const refused = await fetch(`${BASE}/api/projects/delme`, { method: 'DELETE' });
+    expect(refused.status).toBe(400);
+    expect(((await refused.json()) as { error: string }).error).toContain('non-archived');
+    expect(db.projects.has('delme')).toBe(true);
+
+    db.updateTask('t_del1', { status: 'archived' });
+    const ok = await fetch(`${BASE}/api/projects/delme`, { method: 'DELETE' });
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({ ok: true });
+    expect(db.projects.has('delme')).toBe(false);
+    expect(db.tasks.has('t_del1')).toBe(false);
+  });
+
+  it('validates ids and 404s unknown projects', async () => {
+    const badId = await fetch(`${BASE}/api/projects/a.b`, { method: 'DELETE' });
+    expect(badId.status).toBe(400);
+    const unknown = await fetch(`${BASE}/api/projects/nope`, { method: 'DELETE' });
+    expect(unknown.status).toBe(404);
+  });
+});
+
+describe('board service', () => {
+  it('reports available:false and 503s POST when the dep is absent', async () => {
+    const get = await fetch(`${BASE}/api/board-service`);
+    expect(get.status).toBe(200);
+    expect(await get.json()).toEqual({ installed: false, available: false });
+    const post = await fetch(`${BASE}/api/board-service`, { method: 'POST' });
+    expect(post.status).toBe(503);
+  });
+});
+
+describe('board service (with dep)', () => {
+  const PORT2 = PORT + 997;
+  const BASE2 = `http://127.0.0.1:${PORT2}`;
+  const ac2 = new AbortController();
+  let installed = false;
+
+  beforeAll(async () => {
+    await startServer({
+      port: PORT2,
+      db: makeDb(),
+      config: makeConfig(),
+      adapters: {},
+      decideFn: () => ({ action: 'idle', reason: 'test' }),
+      paused: () => false,
+      setPaused: () => undefined,
+      deps: {
+        boardService: {
+          status: () => installed,
+          install: () => {
+            installed = true;
+          },
+        },
+      },
+      signal: ac2.signal,
+    });
+  });
+
+  afterAll(() => ac2.abort());
+
+  it('GET reflects launchd status and POST installs', async () => {
+    const before = await fetch(`${BASE2}/api/board-service`);
+    expect(await before.json()).toEqual({ installed: false, available: true });
+    const post = await fetch(`${BASE2}/api/board-service`, { method: 'POST' });
+    expect(post.status).toBe(200);
+    expect(await post.json()).toEqual({ installed: true });
+    const after = await fetch(`${BASE2}/api/board-service`);
+    expect(await after.json()).toEqual({ installed: true, available: true });
   });
 });
 

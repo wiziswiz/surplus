@@ -24,6 +24,7 @@ import type { ConfigDto, EventDto, ProjectDto, StateDto, TaskDto, TaskStatus } f
 import { Header } from './components/Header';
 import { Board } from './components/Board';
 import { Drawer } from './components/Drawer';
+import { ProjectDrawer } from './components/ProjectDrawer';
 import { AddProjectModal } from './components/AddProjectModal';
 import { SettingsPanel } from './components/SettingsPanel';
 
@@ -35,6 +36,7 @@ export default function App() {
   const [scores, setScores] = useState<Record<string, number>>({});
   const [drawerId, setDrawerId] = useState<string | null>(null);
   const [drawerVersion, setDrawerVersion] = useState(0);
+  const [projectDrawerId, setProjectDrawerId] = useState<string | null>(null);
   const [connected, setConnected] = useState(true);
   const disconnectTimer = useRef<number | null>(null);
   const [showAddProject, setShowAddProject] = useState(false);
@@ -225,13 +227,29 @@ export default function App() {
     setState((s) => (s ? { ...s, config: cfg } : s));
   }, []);
 
+  const onProjectChanged = useCallback((p: ProjectDto) => {
+    setProjects((prev) => prev.map((x) => (x.id === p.id ? p : x)));
+  }, []);
+
+  const onProjectDeleted = useCallback(() => {
+    setProjectDrawerId(null);
+    void refreshAll(); // projects AND tasks (archived ones were deleted too)
+  }, [refreshAll]);
+
+  const drawerProject = projectDrawerId
+    ? (projects.find((p) => p.id === projectDrawerId) ?? null)
+    : null;
+
   return (
     <div className="flex h-screen flex-col">
       <Header
         state={state}
+        projects={projects}
+        tasks={tasks}
         onTogglePause={togglePause}
         onToggleArmed={toggleArmed}
         onAddProject={() => setShowAddProject(true)}
+        onOpenProject={setProjectDrawerId}
         onOpenSettings={() => setShowSettings(true)}
         onRefreshUsage={() => void refreshUsage()}
         refreshState={refreshState}
@@ -253,11 +271,23 @@ export default function App() {
         scores={scores}
         heartbeats={heartbeats}
         onOpen={setDrawerId}
+        onOpenProject={setProjectDrawerId}
         onMove={moveTask}
         onAddTask={addTask}
         onArchive={(id) => void moveTask(id, 'archived')}
         onAddProject={() => setShowAddProject(true)}
       />
+      {drawerProject && (
+        <ProjectDrawer
+          key={drawerProject.id}
+          project={drawerProject}
+          tasks={tasks}
+          config={state?.config}
+          onClose={() => setProjectDrawerId(null)}
+          onChanged={onProjectChanged}
+          onDeleted={onProjectDeleted}
+        />
+      )}
       {drawerId && (
         <Drawer
           key={drawerId}

@@ -57,6 +57,8 @@ export interface CreateTaskInput {
   createdAt?: number;
 }
 
+export type ProjectPatch = Partial<Pick<ProjectRow, 'name' | 'provider' | 'model' | 'effort'>>;
+
 export type TaskPatch = Partial<
   Pick<
     TaskRow,
@@ -117,6 +119,13 @@ export interface SurplusDb {
   createProject(input: CreateProjectInput): ProjectRow;
   getProject(id: string): ProjectRow | null;
   listProjects(): ProjectRow[];
+  /** Appends a 'task-updated' event (taskId null) with {projectId, changed}. */
+  updateProject(id: string, patch: ProjectPatch): ProjectRow;
+  /**
+   * Delete a project and its ARCHIVED tasks (runs first — FK order). Throws
+   * when any task is not 'archived'; returns false when the project is unknown.
+   */
+  deleteProject(id: string): boolean;
 
   createTask(input: CreateTaskInput): TaskRow;
   getTask(id: string): TaskRow | null;
@@ -381,6 +390,13 @@ function mapEvent(r: EventDbRow): TaskEventRow {
 }
 
 /** camelCase patch key → snake_case column, for dynamic UPDATEs. */
+const PROJECT_PATCH_COLUMNS: Record<keyof ProjectPatch & string, string> = {
+  name: 'name',
+  provider: 'provider',
+  model: 'model',
+  effort: 'effort',
+};
+
 const TASK_PATCH_COLUMNS: Record<keyof TaskPatch & string, string> = {
   title: 'title',
   body: 'body',
@@ -536,6 +552,45 @@ export function openDb(dbFilePath?: string): SurplusDb {
     });
   });
 
+  const updateProjectTx = db.transaction((id: string, patch: ProjectPatch): void => {
+    const sets: string[] = [];
+    const values: unknown[] = [];
+    const changed: string[] = [];
+    for (const [key, col] of Object.entries(PROJECT_PATCH_COLUMNS)) {
+      const value = (patch as Record<string, unknown>)[key];
+      if (value === undefined) continue;
+      sets.push(`${col} = ?`);
+      values.push(value);
+      changed.push(key);
+    }
+    if (sets.length === 0) return;
+    values.push(id);
+    db.prepare(`UPDATE projects SET ${sets.join(', ')} WHERE id = ?`).run(...values);
+    // No project event type exists — reuse 'task-updated' (taskId null) so SSE
+    // clients refetch without a schema change.
+    appendEvent('task-updated', null, { projectId: id, changed });
+  });
+
+  // FK order: task_runs → tasks → projects. Refuse while any task is live.
+  const deleteProjectTx = db.transaction((id: string): boolean => {
+    const exists = selectProject.get(id) as ProjectDbRow | undefined;
+    if (!exists) return false;
+    const live = db
+      .prepare(`SELECT COUNT(*) AS n FROM tasks WHERE project_id = ? AND status != 'archived'`)
+      .get(id) as { n: number };
+    if (live.n > 0) {
+      throw new Error(
+        `project '${id}' has ${live.n} non-archived task(s) — archive them before deleting`,
+      );
+    }
+    db.prepare(
+      `DELETE FROM task_runs WHERE task_id IN (SELECT id FROM tasks WHERE project_id = ?)`,
+    ).run(id);
+    db.prepare('DELETE FROM tasks WHERE project_id = ?').run(id);
+    db.prepare('DELETE FROM projects WHERE id = ?').run(id);
+    return true;
+  });
+
   const updateTaskTx = db.transaction((id: string, patch: TaskPatch, existing: TaskRow): void => {
     const sets: string[] = [];
     const values: unknown[] = [];
@@ -622,6 +677,19 @@ export function openDb(dbFilePath?: string): SurplusDb {
 
     listProjects(): ProjectRow[] {
       return (selectProjects.all() as ProjectDbRow[]).map(mapProject);
+    },
+
+    updateProject(id: string, patch: ProjectPatch): ProjectRow {
+      const existing = selectProject.get(id) as ProjectDbRow | undefined;
+      if (!existing) throw new Error(`project not found: ${id}`);
+      updateProjectTx(id, patch);
+      const updated = selectProject.get(id) as ProjectDbRow | undefined;
+      if (!updated) throw new Error(`project vanished during update: ${id}`);
+      return mapProject(updated);
+    },
+
+    deleteProject(id: string): boolean {
+      return deleteProjectTx.immediate(id) === true;
     },
 
     createTask(input: CreateTaskInput): TaskRow {

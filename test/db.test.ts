@@ -119,6 +119,37 @@ describe('projects and tasks', () => {
     expect(db.listTasks({ status: 'archived' })).toHaveLength(1);
     expect(db.listTasks({ projectId: 'other' })).toHaveLength(0);
   });
+
+  it('updateProject patches fields and appends a task-updated event with projectId', () => {
+    const p = makeProject('upd-me');
+    const u = db.updateProject(p.id, { name: 'Renamed', provider: 'claude', model: 'opus' });
+    expect(u.name).toBe('Renamed');
+    expect(u.provider).toBe('claude');
+    expect(u.model).toBe('opus');
+    expect(u.effort).toBeNull(); // untouched
+    const ev = db.listEventsAfter(0).filter((e) => e.type === 'task-updated').at(-1)!;
+    expect(ev.taskId).toBeNull();
+    expect(JSON.parse(ev.data)).toEqual({
+      projectId: p.id,
+      changed: ['name', 'provider', 'model'],
+    });
+    expect(() => db.updateProject('nope', { name: 'x' })).toThrow(/not found/);
+  });
+
+  it('deleteProject refuses while tasks are live, then removes runs+tasks+project', () => {
+    const p = makeProject('del-me');
+    const t = db.createTask({ projectId: p.id, title: 'a', status: 'ready' });
+    db.createRun({ taskId: t.id, provider: 'claude' });
+    expect(() => db.deleteProject(p.id)).toThrow(/non-archived/);
+    expect(db.getProject(p.id)).not.toBeNull();
+
+    db.updateTask(t.id, { status: 'archived' });
+    expect(db.deleteProject(p.id)).toBe(true);
+    expect(db.getProject(p.id)).toBeNull();
+    expect(db.getTask(t.id)).toBeNull();
+    expect(db.listRunsForTask(t.id)).toHaveLength(0);
+    expect(db.deleteProject(p.id)).toBe(false); // already gone
+  });
 });
 
 // ---------------------------------------------------------------------------

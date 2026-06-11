@@ -58,6 +58,7 @@ export function TaskCard({
   score,
   heartbeat,
   onOpen,
+  onOpenProject,
   onMove,
   onArchive,
 }: {
@@ -67,6 +68,7 @@ export function TaskCard({
   score: number | undefined;
   heartbeat: string | undefined;
   onOpen: (id: string) => void;
+  onOpenProject: (id: string) => void;
   onMove: (id: string, status: TaskStatus) => void;
   onArchive: (id: string) => void;
 }) {
@@ -161,9 +163,16 @@ export function TaskCard({
 
       <div className="mt-1.5 flex flex-wrap items-center gap-1">
         {project && (
-          <span className="rounded-chip bg-raised px-1.5 py-0.5 text-xs text-dim">
+          <button
+            onClick={(e) => {
+              e.stopPropagation(); // chip opens the PROJECT drawer, not the task
+              onOpenProject(project.id);
+            }}
+            title={`Open project ${project.name}`}
+            className="rounded-chip bg-raised px-1.5 py-0.5 text-xs text-dim transition-colors duration-150 hover:bg-active hover:text-ink"
+          >
             {project.name}
-          </span>
+          </button>
         )}
         <ProviderBadge pref={task.provider} />
         <span className="rounded-chip bg-raised px-1.5 py-0.5 text-xs text-faint">

@@ -111,6 +111,21 @@ export interface ProjectDto {
   createdAt: number;
 }
 
+/** PATCH /api/projects/:id — name/provider plus model/effort (null = inherit). */
+export interface ProjectPatchDto {
+  name?: string;
+  provider?: ProviderPref;
+  model?: string | null;
+  effort?: string | null;
+}
+
+/** GET /api/board-service — the always-on dashboard launchd agent. */
+export interface BoardServiceDto {
+  installed: boolean;
+  /** False when the server runs without install capability (e.g. tests). */
+  available: boolean;
+}
+
 /** GET /api/discover — local git repos found under config.discovery.roots. */
 export interface DiscoveredRepoDto {
   name: string;

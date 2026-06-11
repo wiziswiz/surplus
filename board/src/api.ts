@@ -1,8 +1,10 @@
 import type {
+  BoardServiceDto,
   ConfigDto,
   ConfigPatchDto,
   DiscoveredRepoDto,
   ProjectDto,
+  ProjectPatchDto,
   Provider,
   StateDto,
   TaskDetailDto,
@@ -58,6 +60,26 @@ export const createProject = (body: { path: string } | { name: string }) =>
   api<ProjectDto>('/api/projects', { method: 'POST', body: JSON.stringify(body) });
 
 export const getDiscover = () => api<DiscoveredRepoDto[]>('/api/discover');
+
+export const getProjectVision = (id: string) =>
+  api<{ markdown: string }>(`/api/projects/${id}/vision`);
+
+export const putProjectVision = (id: string, markdown: string) =>
+  api<{ ok: boolean }>(`/api/projects/${id}/vision`, {
+    method: 'PUT',
+    body: JSON.stringify({ markdown }),
+  });
+
+export const patchProject = (id: string, patch: ProjectPatchDto) =>
+  api<ProjectDto>(`/api/projects/${id}`, { method: 'PATCH', body: JSON.stringify(patch) });
+
+export const deleteProject = (id: string) =>
+  api<{ ok: boolean }>(`/api/projects/${id}`, { method: 'DELETE' });
+
+export const getBoardService = () => api<BoardServiceDto>('/api/board-service');
+
+export const installBoardService = () =>
+  api<{ installed: boolean }>('/api/board-service', { method: 'POST' });
 
 /** Mirrors the dispatcher's DispatchResult (returned in the burn response). */
 export interface BurnResultDto {

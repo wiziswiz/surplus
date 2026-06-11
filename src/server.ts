@@ -15,7 +15,7 @@ import { streamSSE } from 'hono/streaming';
 import { serve } from '@hono/node-server';
 import type { ServerType } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
-import { existsSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -45,6 +45,12 @@ export interface ServerDb {
   listProjects(): ProjectRow[];
   getProject(id: string): ProjectRow | undefined | null;
   insertProject(row: ProjectRow): void;
+  updateProject(
+    id: string,
+    patch: Partial<Pick<ProjectRow, 'name' | 'provider' | 'model' | 'effort'>>,
+  ): ProjectRow | undefined | null;
+  /** Throws when the project still has non-archived tasks; false when unknown. */
+  deleteProject(id: string): boolean;
   /** No arg → all non-archived tasks. */
   listTasks(status?: TaskStatus): TaskRow[];
   getTask(id: string): TaskRow | undefined | null;
@@ -80,6 +86,16 @@ export interface ServerDeps {
   scheduler?: {
     status: () => boolean;
     setArmed: (on: boolean) => boolean;
+  };
+  /**
+   * Always-on board service (launchd KeepAlive + Dock app). Injected by
+   * cli.ts using install.ts — POST /api/board-service is 503 without it.
+   * Install-only by design: removing the service from inside the service it
+   * keeps alive is a footgun, so uninstall stays CLI-only.
+   */
+  boardService?: {
+    status: () => boolean;
+    install: () => void;
   };
 }
 
@@ -212,6 +228,42 @@ export function buildTaskPatch(
   if ('provider' in body) {
     if (!isProviderPref(body.provider)) return { ok: false, error: 'invalid provider' };
     patch.provider = body.provider;
+  }
+  if (Object.keys(patch).length === 0) return { ok: false, error: 'no patchable fields' };
+  return { ok: true, patch };
+}
+
+/** Max bytes accepted for PUT /api/projects/:id/vision. */
+export const VISION_MAX_CHARS = 64_000;
+
+type ProjectPatchFields = Partial<Pick<ProjectRow, 'name' | 'provider' | 'model' | 'effort'>>;
+
+/** Fields the board may PATCH on a project (path/visionPath are immutable). */
+export function buildProjectPatch(
+  body: Record<string, unknown>,
+): { ok: true; patch: ProjectPatchFields } | { ok: false; error: string } {
+  const patch: ProjectPatchFields = {};
+  if ('name' in body) {
+    if (typeof body.name !== 'string' || !body.name.trim()) {
+      return { ok: false, error: 'name must be a non-empty string' };
+    }
+    patch.name = body.name.trim();
+  }
+  if ('provider' in body) {
+    if (!isProviderPref(body.provider)) return { ok: false, error: 'invalid provider' };
+    patch.provider = body.provider;
+  }
+  if ('model' in body) {
+    if (body.model !== null && (typeof body.model !== 'string' || !body.model.trim())) {
+      return { ok: false, error: 'model must be a non-empty string or null' };
+    }
+    patch.model = body.model === null ? null : body.model.trim();
+  }
+  if ('effort' in body) {
+    if (body.effort !== null && (typeof body.effort !== 'string' || !body.effort.trim())) {
+      return { ok: false, error: 'effort must be a non-empty string or null' };
+    }
+    patch.effort = body.effort === null ? null : body.effort.trim();
   }
   if (Object.keys(patch).length === 0) return { ok: false, error: 'no patchable fields' };
   return { ok: true, patch };
@@ -530,6 +582,69 @@ export async function startServer(opts: StartServerOptions): Promise<void> {
     return c.json({ error: 'body must be {path} or {name}' }, 400);
   });
 
+  // Project VISION.md — the contract the worker and judge are graded against.
+  app.get('/api/projects/:id/vision', (c) => {
+    const id = c.req.param('id');
+    if (!validId(id)) return c.json({ error: 'invalid project id' }, 400);
+    const project = db.getProject(id);
+    if (!project) return c.json({ error: 'project not found' }, 404);
+    let markdown = '';
+    try {
+      markdown = readFileSync(project.visionPath, 'utf8');
+    } catch {
+      // Missing file → empty editor, not an error.
+    }
+    return c.json({ markdown });
+  });
+
+  app.put('/api/projects/:id/vision', async (c) => {
+    const id = c.req.param('id');
+    if (!validId(id)) return c.json({ error: 'invalid project id' }, 400);
+    const project = db.getProject(id);
+    if (!project) return c.json({ error: 'project not found' }, 404);
+    const body = await readJson(c);
+    if (!body) return c.json({ error: 'invalid JSON body' }, 400);
+    if (typeof body.markdown !== 'string') {
+      return c.json({ error: 'body must be {markdown: string}' }, 400);
+    }
+    if (body.markdown.length > VISION_MAX_CHARS) {
+      return c.json({ error: `markdown exceeds ${VISION_MAX_CHARS} characters` }, 400);
+    }
+    try {
+      writeFileSync(project.visionPath, body.markdown, 'utf8');
+    } catch (e) {
+      return c.json({ error: `failed to write VISION.md: ${errMsg(e)}` }, 500);
+    }
+    return c.json({ ok: true });
+  });
+
+  app.patch('/api/projects/:id', async (c) => {
+    const id = c.req.param('id');
+    if (!validId(id)) return c.json({ error: 'invalid project id' }, 400);
+    const project = db.getProject(id);
+    if (!project) return c.json({ error: 'project not found' }, 404);
+    const body = await readJson(c);
+    if (!body) return c.json({ error: 'invalid JSON body' }, 400);
+    const built = buildProjectPatch(body);
+    if (!built.ok) return c.json({ error: built.error }, 400);
+    const updated = db.updateProject(id, built.patch) ?? db.getProject(id);
+    if (!updated) return c.json({ error: 'project not found' }, 404);
+    return c.json(updated);
+  });
+
+  app.delete('/api/projects/:id', (c) => {
+    const id = c.req.param('id');
+    if (!validId(id)) return c.json({ error: 'invalid project id' }, 400);
+    if (!db.getProject(id)) return c.json({ error: 'project not found' }, 404);
+    try {
+      db.deleteProject(id);
+    } catch (e) {
+      // db refuses while non-archived tasks exist — surface why.
+      return c.json({ error: errMsg(e) }, 400);
+    }
+    return c.json({ ok: true });
+  });
+
   // --- tasks ------------------------------------------------------------------
 
   app.get('/api/tasks', (c) => {
@@ -650,6 +765,35 @@ export async function startServer(opts: StartServerOptions): Promise<void> {
       reason: armed ? 'tick scheduler installed via API' : 'tick scheduler removed via API',
     });
     return c.json({ armed });
+  });
+
+  // Always-on board service (launchd KeepAlive + Dock app). Install-only:
+  // uninstalling the service that keeps THIS process alive stays CLI-only.
+  app.get('/api/board-service', (c) => {
+    if (!deps?.boardService) return c.json({ installed: false, available: false });
+    let installed = false;
+    try {
+      installed = deps.boardService.status();
+    } catch {
+      /* status probe failed — report not-installed rather than crash */
+    }
+    return c.json({ installed, available: true });
+  });
+
+  app.post('/api/board-service', (c) => {
+    if (!deps?.boardService) {
+      return c.json({ error: 'board service control not available' }, 503);
+    }
+    try {
+      deps.boardService.install();
+    } catch (e) {
+      return c.json({ error: errMsg(e) }, 500);
+    }
+    db.appendEvent('decision', null, {
+      action: 'board-service-installed',
+      reason: 'always-on board service installed via API',
+    });
+    return c.json({ installed: deps.boardService.status() });
   });
 
   app.post('/api/burn', async (c) => {

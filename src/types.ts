@@ -330,6 +330,12 @@ export interface Vision {
 //   GET  /api/state                  → ApiState
 //   GET  /api/projects               → ProjectRow[]
 //   POST /api/projects               → body {path} (existing) | {name} (new) → ProjectRow
+//   PATCH /api/projects/:id          → body subset {name?, provider? (claude|codex|any), model?, effort?}
+//                                      (non-empty strings; model/effort also accept null = inherit) → ProjectRow
+//   DELETE /api/projects/:id         → 400 while any task is non-archived; else deletes the
+//                                      project + its archived tasks/runs → {ok: true}
+//   GET  /api/projects/:id/vision    → {markdown: string} ('' when VISION.md is missing)
+//   PUT  /api/projects/:id/vision    → body {markdown: string} (≤64 000 chars) → writes visionPath → {ok: true}
 //   GET  /api/tasks?status=...       → TaskRow[] (all non-archived when no filter)
 //   POST /api/tasks                  → body Partial<TaskRow> & {projectId,title} → TaskRow
 //   GET  /api/tasks/:id              → {task: TaskRow, runs: TaskRunRow[], events: TaskEventRow[]}
@@ -340,6 +346,10 @@ export interface Vision {
 //                                      → effective SurplusConfig (persisted via the cli-injected updateConfig dep)
 //   POST /api/pause | /api/resume    → {paused: boolean}
 //   POST /api/scheduler              → body {armed: boolean} → installs/removes the launchd tick agent → {armed: boolean}
+//   GET  /api/board-service          → {installed: boolean, available: boolean} (always-on board launchd agent;
+//                                      available:false when the server runs without the cli-injected dep)
+//   POST /api/board-service          → installs the KeepAlive board service + Dock app → {installed: boolean}
+//                                      (503 without the dep; uninstall is deliberately CLI-only)
 //   POST /api/burn                   → body {taskId?: string, provider?: Provider} → manual one-shot dispatch (ignores windows, respects pacing)
 //   GET  /api/events?after=<id>      → SSE stream of TaskEventRow (named event: 'ev') + periodic 'state' frames (ApiState)
 //   GET  /api/events/poll?after=<id> → TaskEventRow[] (plain JSON for non-SSE clients, e.g. the menu-bar app)

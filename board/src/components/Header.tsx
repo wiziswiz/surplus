@@ -1,4 +1,5 @@
-import type { DecisionDto, Provider, StateDto, UsageDto } from '../types';
+import { useState } from 'react';
+import type { DecisionDto, ProjectDto, Provider, StateDto, TaskDto, UsageDto } from '../types';
 import { fmtCountdown, fmtRel } from '../lib';
 import { useNow } from '../useNow';
 
@@ -6,17 +7,23 @@ export type RefreshState = 'idle' | 'busy' | 'cooldown';
 
 export function Header({
   state,
+  projects,
+  tasks,
   onTogglePause,
   onToggleArmed,
   onAddProject,
+  onOpenProject,
   onOpenSettings,
   onRefreshUsage,
   refreshState,
 }: {
   state: StateDto | null;
+  projects: ProjectDto[];
+  tasks: TaskDto[];
   onTogglePause: () => void;
   onToggleArmed: () => void;
   onAddProject: () => void;
+  onOpenProject: (id: string) => void;
   onOpenSettings: () => void;
   onRefreshUsage: () => void;
   refreshState: RefreshState;
@@ -66,6 +73,7 @@ export function Header({
             >
               + Project
             </button>
+            <ProjectsPopover projects={projects} tasks={tasks} onOpenProject={onOpenProject} />
             <button
               onClick={onOpenSettings}
               disabled={!state}
@@ -97,6 +105,73 @@ export function Header({
         )}
       </div>
     </header>
+  );
+}
+
+/** Lightweight project list (name + path + task count) → opens the ProjectDrawer. */
+function ProjectsPopover({
+  projects,
+  tasks,
+  onOpenProject,
+}: {
+  projects: ProjectDto[];
+  tasks: TaskDto[];
+  onOpenProject: (id: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        className="rounded-chip bg-overlay px-2.5 py-1 text-xs text-dim transition-colors duration-150 hover:bg-active hover:text-ink"
+      >
+        Projects
+      </button>
+      {open && (
+        <>
+          <div
+            aria-hidden="true"
+            className="fixed inset-0 z-(--z-dropdown)"
+            onClick={() => setOpen(false)}
+          />
+          <div
+            role="menu"
+            aria-label="Projects"
+            className="absolute left-0 top-8 z-(--z-dropdown) max-h-80 w-72 overflow-y-auto rounded-card bg-raised p-1 shadow-lg ring-1 ring-line"
+          >
+            {projects.length === 0 && (
+              <p className="px-2 py-2 text-xs text-faint">no projects yet</p>
+            )}
+            {projects.map((p) => {
+              const count = tasks.filter((t) => t.projectId === p.id).length;
+              return (
+                <button
+                  key={p.id}
+                  role="menuitem"
+                  onClick={() => {
+                    setOpen(false);
+                    onOpenProject(p.id);
+                  }}
+                  className="flex w-full items-center gap-2 rounded-chip px-2 py-1.5 text-left transition-colors duration-150 hover:bg-overlay"
+                >
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-xs font-medium text-ink">{p.name}</span>
+                    <span className="block truncate text-[10px] text-faint" title={p.path}>
+                      {p.path}
+                    </span>
+                  </span>
+                  <span className="shrink-0 rounded-chip bg-overlay px-1.5 py-0.5 text-[10px] text-dim">
+                    {count} task{count === 1 ? '' : 's'}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
+    </div>
   );
 }
 
