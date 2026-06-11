@@ -97,6 +97,26 @@ but still respects pacing and the kill switch.
 
 </details>
 
+## The menu-bar app
+
+surplus lives best in your menu bar: a live gauge (`◔ 62%` weekly, `🔥` while
+burning, `⏸` when paused) with a dropdown showing per-provider windows, the
+current decision, and one-click **Burn now / Pause / Open Board** — plus
+native notifications when a run starts, a judge scores, or a task gets
+blocked. It's a ~7MB pure-Rust Tauri shell; the launchd services stay in
+charge, the app is just a window onto them.
+
+```sh
+# one-time: Rust toolchain (brew install rust), then
+cd desktop && pnpm install && pnpm tauri build
+cp -R src-tauri/target/release/bundle/macos/Surplus.app /Applications/
+open /Applications/Surplus.app
+```
+
+Add it to System Settings → Login Items to have the gauge always there.
+(No Rust? `surplus install --board` alone gives you the always-on dashboard
+plus a thin Dock launcher — the menu-bar app is the deluxe option.)
+
 ## What & why
 
 The idea went viral as a cron job (@aaronjmars's tweet and his `aeon` repo):
