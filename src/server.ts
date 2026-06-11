@@ -664,6 +664,15 @@ export async function startServer(opts: StartServerOptions): Promise<void> {
   const HISTORY_DEFAULT = 200;
   const POLL_BATCH = 500;
 
+  // Plain-JSON event poll for non-SSE clients (the menu-bar app): rows with
+  // id > after, oldest first, capped at one batch.
+  app.get('/api/events/poll', (c) => {
+    const afterRaw = c.req.query('after') ?? '0';
+    const after = Number.parseInt(afterRaw, 10);
+    if (!Number.isFinite(after) || after < 0) return c.json({ error: 'invalid after id' }, 400);
+    return c.json(db.eventsAfter(after, POLL_BATCH));
+  });
+
   app.get('/api/events', (c) => {
     const afterRaw = c.req.query('after') ?? c.req.header('Last-Event-ID');
     let after: number | null = null;

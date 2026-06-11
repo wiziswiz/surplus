@@ -3,6 +3,10 @@ node_modules/
 dist/
 board/node_modules/
 board/dist/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+desktop/src-tauri/icons/android/
+desktop/src-tauri/icons/ios/
 
 # runtime state — NEVER commit (lives in ~/.surplus, but belt & suspenders)
 .surplus/
