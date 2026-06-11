@@ -339,8 +339,10 @@ export interface Vision {
 //                                      port 1024–65535, non-empty model/effort, provider keys claude|codex)
 //                                      → effective SurplusConfig (persisted via the cli-injected updateConfig dep)
 //   POST /api/pause | /api/resume    → {paused: boolean}
+//   POST /api/scheduler              → body {armed: boolean} → installs/removes the launchd tick agent → {armed: boolean}
 //   POST /api/burn                   → body {taskId?: string, provider?: Provider} → manual one-shot dispatch (ignores windows, respects pacing)
 //   GET  /api/events?after=<id>      → SSE stream of TaskEventRow (named event: 'ev') + periodic 'state' frames (ApiState)
+//   GET  /api/events/poll?after=<id> → TaskEventRow[] (plain JSON for non-SSE clients, e.g. the menu-bar app)
 //
 /** One repo found by the discovery scanner (GET /api/discover). */
 export interface DiscoveredRepo {
@@ -363,6 +365,8 @@ export interface ApiState {
   /** Per-provider decisions; key absent when the provider is disabled. */
   decisions: Partial<Record<Provider, Decision>>;
   paused: boolean;
+  /** True when the launchd tick scheduler is installed (the master switch). */
+  armed: boolean;
   config: SurplusConfig;
   /** Running tasks' ids for the board's live indicators. */
   running: string[];

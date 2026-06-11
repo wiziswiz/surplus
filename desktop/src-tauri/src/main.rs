@@ -46,6 +46,8 @@ struct ApiState {
     usage: serde_json::Map<String, serde_json::Value>,
     decisions: serde_json::Map<String, serde_json::Value>,
     paused: bool,
+    #[serde(default)]
+    armed: bool,
 }
 
 #[derive(Deserialize)]
@@ -63,12 +65,14 @@ struct EventRow {
 struct Shared {
     port: u16,
     paused: bool,
+    armed: bool,
     last_event_id: u64,
     tray: TrayIcon,
     line_claude: MenuItem<tauri::Wry>,
     line_codex: MenuItem<tauri::Wry>,
     line_decision: MenuItem<tauri::Wry>,
     item_pause: MenuItem<tauri::Wry>,
+    item_arm: MenuItem<tauri::Wry>,
 }
 
 struct State(Mutex<Shared>);
@@ -98,9 +102,14 @@ fn get_json<T: serde::de::DeserializeOwned>(url: &str) -> Option<T> {
 }
 
 fn post(url: &str) -> bool {
+    post_body(url, "{}")
+}
+
+fn post_body(url: &str, body: &str) -> bool {
     ureq::post(url)
+        .set("content-type", "application/json")
         .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
-        .send_string("{}")
+        .send_string(body)
         .is_ok()
 }
 
@@ -129,7 +138,14 @@ fn provider_line(name: &str, u: &Usage) -> String {
 }
 
 /// Compact menu-bar title. Weekly utilization is the burn-relevant number.
-fn tray_title(paused: bool, burning: bool, weekly: Option<f64>, reachable: bool) -> String {
+/// Hollow ring = disarmed (scheduler not installed), filled = armed.
+fn tray_title(
+    paused: bool,
+    armed: bool,
+    burning: bool,
+    weekly: Option<f64>,
+    reachable: bool,
+) -> String {
     if !reachable {
         return "surplus ⌁".into();
     }
@@ -139,8 +155,10 @@ fn tray_title(paused: bool, burning: bool, weekly: Option<f64>, reachable: bool)
     let w = pct(weekly);
     if burning {
         format!("🔥 {w}")
-    } else {
+    } else if armed {
         format!("◔ {w}")
+    } else {
+        format!("◌ {w}")
     }
 }
 
@@ -162,11 +180,14 @@ fn refresh(app: &AppHandle, fresh: bool) {
     let mut s = state.0.lock().unwrap();
     match api_state {
         None => {
-            let _ = s.tray.set_title(Some(tray_title(false, false, None, false)));
+            let _ = s
+                .tray
+                .set_title(Some(tray_title(false, false, false, None, false)));
             let _ = s.line_decision.set_text("server unreachable — launchd will restart it");
         }
         Some(st) => {
             s.paused = st.paused;
+            s.armed = st.armed;
 
             let parse_usage = |key: &str| -> Option<Usage> {
                 st.usage
@@ -191,7 +212,7 @@ fn refresh(app: &AppHandle, fresh: bool) {
 
             let _ = s
                 .tray
-                .set_title(Some(tray_title(st.paused, burning, weekly, true)));
+                .set_title(Some(tray_title(st.paused, st.armed, burning, weekly, true)));
 
             match &claude {
                 Some(u) => {
@@ -218,6 +239,11 @@ fn refresh(app: &AppHandle, fresh: bool) {
             let _ = s
                 .item_pause
                 .set_text(if st.paused { "Resume burning" } else { "Pause" });
+            let _ = s.item_arm.set_text(if st.armed {
+                "Disarm schedule"
+            } else {
+                "Arm schedule"
+            });
         }
     }
 
@@ -326,6 +352,7 @@ fn main() {
             let item_open = MenuItemBuilder::with_id("open", "Open Board").build(app)?;
             let item_burn = MenuItemBuilder::with_id("burn", "Burn now").build(app)?;
             let item_pause = MenuItemBuilder::with_id("pause", "Pause").build(app)?;
+            let item_arm = MenuItemBuilder::with_id("arm", "Arm schedule").build(app)?;
             let item_refresh = MenuItemBuilder::with_id("refresh", "Refresh usage").build(app)?;
             let item_quit = MenuItemBuilder::with_id("quit", "Quit Surplus").build(app)?;
 
@@ -337,6 +364,7 @@ fn main() {
                 .item(&item_open)
                 .item(&item_burn)
                 .item(&item_pause)
+                .item(&item_arm)
                 .item(&item_refresh)
                 .separator()
                 .item(&item_quit)
@@ -369,6 +397,24 @@ fn main() {
                             let _ = post(&api(port, path));
                             refresh(app, false);
                         }
+                        "arm" => {
+                            let armed = app.state::<State>().0.lock().unwrap().armed;
+                            let body = format!("{{\"armed\": {}}}", !armed);
+                            let ok = post_body(&api(port, "/api/scheduler"), &body);
+                            let _ = app
+                                .notification()
+                                .builder()
+                                .title(if !armed { "Scheduler armed" } else { "Scheduler disarmed" })
+                                .body(if !ok {
+                                    "Could not reach the surplus server."
+                                } else if !armed {
+                                    "surplus now checks usage every 15 min and burns in pre-reset windows."
+                                } else {
+                                    "Automatic burning is off. Manual Burn now still works."
+                                })
+                                .show();
+                            refresh(app, false);
+                        }
                         "refresh" => refresh(app, true),
                         "quit" => app.exit(0),
                         _ => {}
@@ -384,12 +430,14 @@ fn main() {
             app.manage(State(Mutex::new(Shared {
                 port,
                 paused: false,
+                armed: false,
                 last_event_id,
                 tray,
                 line_claude,
                 line_codex,
                 line_decision,
                 item_pause,
+                item_arm,
             })));
 
             // First paint + poll loop.

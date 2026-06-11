@@ -74,5 +74,8 @@ export const burnNow = (taskId?: string, provider?: Provider) =>
 export const setPausedApi = (paused: boolean) =>
   api<{ paused: boolean }>(`/api/${paused ? 'pause' : 'resume'}`, { method: 'POST' });
 
+export const setArmedApi = (armed: boolean) =>
+  api<{ armed: boolean }>('/api/scheduler', { method: 'POST', body: JSON.stringify({ armed }) });
+
 export const patchConfig = (patch: ConfigPatchDto) =>
   api<ConfigDto>('/api/config', { method: 'PATCH', body: JSON.stringify(patch) });

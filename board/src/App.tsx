@@ -11,7 +11,15 @@
  *    uniform radii, transition:all, toasts-for-errors, stagger-on-static.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { createTask, getProjects, getState, getTasks, patchTask, setPausedApi } from './api';
+import {
+  createTask,
+  getProjects,
+  getState,
+  getTasks,
+  patchTask,
+  setArmedApi,
+  setPausedApi,
+} from './api';
 import type { ConfigDto, EventDto, ProjectDto, StateDto, TaskDto, TaskStatus } from './types';
 import { Header } from './components/Header';
 import { Board } from './components/Board';
@@ -183,6 +191,16 @@ export default function App() {
     }
   }, [state?.paused]);
 
+  const toggleArmed = useCallback(async () => {
+    const current = state?.armed ?? false;
+    try {
+      const r = await setArmedApi(!current);
+      setState((s) => (s ? { ...s, armed: r.armed } : s));
+    } catch {
+      /* leave as-is */
+    }
+  }, [state?.armed]);
+
   const moveTask = useCallback(
     async (id: string, status: TaskStatus) => {
       setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, status } : t)));
@@ -212,6 +230,7 @@ export default function App() {
       <Header
         state={state}
         onTogglePause={togglePause}
+        onToggleArmed={toggleArmed}
         onAddProject={() => setShowAddProject(true)}
         onOpenSettings={() => setShowSettings(true)}
         onRefreshUsage={() => void refreshUsage()}

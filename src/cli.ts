@@ -42,6 +42,7 @@ import {
   installBoardLaunchd,
   installDockApp,
   installLaunchd,
+  launchdPlistPath,
   uninstallBoardLaunchd,
   uninstallDockApp,
   uninstallLaunchd,
@@ -767,6 +768,11 @@ program
             const next = applyConfigPatch(loadConfig(), patch);
             saveConfig(next);
             return next;
+          },
+          scheduler: {
+            status: () => existsSync(launchdPlistPath()),
+            setArmed: (on: boolean) =>
+              on ? (installLaunchd({ intervalMinutes: 15 }), true) : uninstallLaunchd(),
           },
         },
       });

@@ -72,6 +72,15 @@ export interface ServerDeps {
    * loadConfig/saveConfig — PATCH /api/config is 503 without it.
    */
   updateConfig?: (patch: ConfigPatch) => SurplusConfig | Promise<SurplusConfig>;
+  /**
+   * The master switch: query/toggle the launchd tick scheduler. Injected by
+   * cli.ts using install.ts — POST /api/scheduler is 503 without it, and
+   * ApiState.armed is false.
+   */
+  scheduler?: {
+    status: () => boolean;
+    setArmed: (on: boolean) => boolean;
+  };
 }
 
 export interface StartServerOptions {
@@ -420,10 +429,17 @@ export async function startServer(opts: StartServerOptions): Promise<void> {
         decisions[prov] = { action: 'stop', reason: `decision error: ${errMsg(e)}` };
       }
     }
+    let armed = false;
+    try {
+      armed = deps?.scheduler ? deps.scheduler.status() : false;
+    } catch {
+      /* status probe failed — report disarmed rather than crash state */
+    }
     return {
       usage,
       decisions,
       paused: isPaused,
+      armed,
       config,
       running: db.listTasks('running').map((t) => t.id),
     };
@@ -614,6 +630,26 @@ export async function startServer(opts: StartServerOptions): Promise<void> {
   app.post('/api/resume', (c) => {
     setPaused(false);
     return c.json({ paused: false });
+  });
+
+  // Master switch: install/remove the launchd tick scheduler.
+  app.post('/api/scheduler', async (c) => {
+    if (!deps?.scheduler) return c.json({ error: 'scheduler control not available' }, 503);
+    const body = await readJson(c);
+    if (!body || typeof body.armed !== 'boolean') {
+      return c.json({ error: 'body must be {armed: boolean}' }, 400);
+    }
+    try {
+      deps.scheduler.setArmed(body.armed);
+    } catch (e) {
+      return c.json({ error: errMsg(e) }, 500);
+    }
+    const armed = deps.scheduler.status();
+    db.appendEvent('decision', null, {
+      action: armed ? 'armed' : 'disarmed',
+      reason: armed ? 'tick scheduler installed via API' : 'tick scheduler removed via API',
+    });
+    return c.json({ armed });
   });
 
   app.post('/api/burn', async (c) => {

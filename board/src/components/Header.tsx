@@ -7,6 +7,7 @@ export type RefreshState = 'idle' | 'busy' | 'cooldown';
 export function Header({
   state,
   onTogglePause,
+  onToggleArmed,
   onAddProject,
   onOpenSettings,
   onRefreshUsage,
@@ -14,12 +15,14 @@ export function Header({
 }: {
   state: StateDto | null;
   onTogglePause: () => void;
+  onToggleArmed: () => void;
   onAddProject: () => void;
   onOpenSettings: () => void;
   onRefreshUsage: () => void;
   refreshState: RefreshState;
 }) {
   const paused = state?.paused ?? false;
+  const armed = state?.armed ?? false;
   // ApiState contract: a provider's usage key is ABSENT when it is disabled —
   // omit its panel instead of rendering empty gauges. (claude defaults to
   // shown while state is still loading, since it is enabled by default.)
@@ -31,6 +34,22 @@ export function Header({
         <div className="flex flex-col justify-center gap-2.5 border-r border-line pr-8">
           <h1 className="text-base font-bold tracking-[0.3em] text-ink">SURPLUS</h1>
           <div className="flex items-center gap-2">
+            <button
+              onClick={onToggleArmed}
+              disabled={!state}
+              title={
+                armed
+                  ? 'Scheduler armed: surplus checks usage every 15 min and burns in pre-reset windows. Click to disarm.'
+                  : 'Arm the scheduler: installs the background agent that burns expiring quota automatically.'
+              }
+              className={`rounded-chip px-2.5 py-1 text-xs font-semibold transition-colors duration-150 disabled:opacity-50 ${
+                armed
+                  ? 'bg-jade/20 text-jade hover:bg-jade/30'
+                  : 'bg-ember/20 text-ember hover:bg-ember/30'
+              }`}
+            >
+              {armed ? '⏻ Armed' : 'Arm schedule'}
+            </button>
             <button
               onClick={onTogglePause}
               className={`rounded-chip px-2.5 py-1 text-xs font-medium transition-colors duration-150 ${

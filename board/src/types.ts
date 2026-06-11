@@ -94,6 +94,8 @@ export interface StateDto {
   usage: Partial<Record<Provider, UsageDto | null>>;
   decisions: Partial<Record<Provider, DecisionDto>>;
   paused: boolean;
+  /** True when the launchd tick scheduler is installed (the master switch). */
+  armed: boolean;
   config: ConfigDto;
   running: string[];
 }
