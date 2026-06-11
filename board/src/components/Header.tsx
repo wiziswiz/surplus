@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import type { DecisionDto, ProjectDto, Provider, StateDto, TaskDto, UsageDto } from '../types';
 import { fmtCountdown, fmtRel } from '../lib';
 import { useNow } from '../useNow';
@@ -61,7 +61,7 @@ export function Header({
               onClick={onTogglePause}
               className={`rounded-chip px-2.5 py-1 text-xs font-medium transition-colors duration-150 ${
                 paused
-                  ? 'bg-danger/20 text-danger hover:bg-danger/30'
+                  ? 'bg-danger/20 text-danger hover:bg-danger/25'
                   : 'bg-overlay text-dim hover:bg-active hover:text-ink'
               }`}
             >
@@ -119,9 +119,11 @@ function ProjectsPopover({
   onOpenProject: (id: string) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const btnRef = useRef<HTMLButtonElement>(null);
   return (
     <div className="relative">
       <button
+        ref={btnRef}
         onClick={() => setOpen((o) => !o)}
         aria-haspopup="menu"
         aria-expanded={open}
@@ -139,6 +141,13 @@ function ProjectsPopover({
           <div
             role="menu"
             aria-label="Projects"
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') {
+                e.stopPropagation();
+                setOpen(false);
+                btnRef.current?.focus();
+              }
+            }}
             className="absolute left-0 top-8 z-(--z-dropdown) max-h-80 w-72 overflow-y-auto rounded-card bg-raised p-1 shadow-lg ring-1 ring-line"
           >
             {projects.length === 0 && (
@@ -246,7 +255,10 @@ function ProviderPanel({
             usage unavailable{usage.error ? ` · ${usage.error}` : ''}
           </span>
         )}
-        <DecisionBanner decision={decision} />
+        {/* Persistent live region: SSE flips burn/idle without a page action */}
+        <span role="status" className="flex min-w-0 items-center">
+          <DecisionBanner decision={decision} />
+        </span>
         {usage && !usage.unavailable && (
           <span className="ml-auto flex shrink-0 items-center gap-1.5 text-xs text-faint">
             updated {fmtRel(usage.fetchedAt, now)}
@@ -259,7 +271,7 @@ function ProviderPanel({
                   ? 'Refreshed — available again in a moment'
                   : 'Refresh usage now'
               }
-              className="rounded-chip p-1 text-faint transition-colors duration-150 hover:bg-active hover:text-ink disabled:cursor-default disabled:opacity-40"
+              className="rounded-chip p-1.5 text-faint transition-colors duration-150 hover:bg-active hover:text-ink disabled:cursor-default disabled:opacity-40"
             >
               <RefreshIcon spinning={refreshState === 'busy'} />
             </button>

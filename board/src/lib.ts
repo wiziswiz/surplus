@@ -53,7 +53,7 @@ export function effectiveModelEffort(
 export const PROVIDER_TINT: Record<ProviderPref, string> = {
   claude: 'bg-ember/15 text-ember',
   codex: 'bg-jade/15 text-jade',
-  any: 'bg-overlay text-dim',
+  any: 'bg-raised text-dim', // raised, not overlay — badge sits ON overlay cards
 };
 
 export const MODEL_OPTIONS: Record<ProviderPref, string[]> = {

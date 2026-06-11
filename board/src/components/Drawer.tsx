@@ -246,9 +246,9 @@ export function Drawer({
 
               {task.judgeFeedback && (
                 <section className="flex flex-col gap-1">
-                  <h3 className="text-[11px] uppercase tracking-[0.12em] text-faint">
+                  <h2 className="text-[11px] uppercase tracking-[0.12em] text-faint">
                     judge feedback
-                  </h3>
+                  </h2>
                   <pre className="whitespace-pre-wrap rounded-card bg-overlay p-3 font-sans text-xs leading-relaxed text-dim">
                     {task.judgeFeedback}
                   </pre>
@@ -256,9 +256,9 @@ export function Drawer({
               )}
 
               <section className="flex flex-col gap-2">
-                <h3 className="text-[11px] uppercase tracking-[0.12em] text-faint">
+                <h2 className="text-[11px] uppercase tracking-[0.12em] text-faint">
                   run history ({detail.runs.length})
-                </h3>
+                </h2>
                 {detail.runs.length === 0 && (
                   <p className="rounded-card border border-dashed border-line px-3 py-4 text-center text-xs text-faint">
                     no runs yet — "Burn now" dispatches outside the schedule
@@ -283,8 +283,8 @@ const OUTCOME_TINT: Record<string, string> = {
   failed: 'bg-ember/15 text-ember',
   error: 'bg-danger/15 text-danger',
   timeout: 'bg-danger/15 text-danger',
-  quota: 'bg-overlay text-dim',
-  killed: 'bg-overlay text-dim',
+  quota: 'bg-raised text-dim', // raised, not overlay — chip sits ON an overlay row
+  killed: 'bg-raised text-dim',
 };
 
 function RunItem({ run }: { run: RunDto }) {
@@ -320,7 +320,8 @@ function RunItem({ run }: { run: RunDto }) {
                   window.setTimeout(() => setCopied(false), 1500);
                 });
               }}
-              className="rounded-chip px-1.5 py-0.5 text-[10px] text-faint transition-colors duration-150 hover:text-ink"
+              aria-live="polite"
+              className="inline-flex min-h-6 items-center rounded-chip px-1.5 py-0.5 text-[10px] text-faint transition-colors duration-150 hover:text-ink"
             >
               {copied ? 'copied' : 'copy'}
             </button>
@@ -329,13 +330,13 @@ function RunItem({ run }: { run: RunDto }) {
         {run.summary && <p className="whitespace-pre-wrap leading-relaxed">{run.summary}</p>}
         {run.judgeReasons && (
           <div>
-            <h4 className="text-[10px] uppercase tracking-[0.12em] text-faint">judge reasons</h4>
+            <h3 className="text-[10px] uppercase tracking-[0.12em] text-faint">judge reasons</h3>
             <p className="whitespace-pre-wrap leading-relaxed">{run.judgeReasons}</p>
           </div>
         )}
         {run.judgeMissing && (
           <div>
-            <h4 className="text-[10px] uppercase tracking-[0.12em] text-faint">missing</h4>
+            <h3 className="text-[10px] uppercase tracking-[0.12em] text-faint">missing</h3>
             <p className="whitespace-pre-wrap leading-relaxed">{run.judgeMissing}</p>
           </div>
         )}

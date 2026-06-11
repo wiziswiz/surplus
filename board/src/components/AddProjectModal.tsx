@@ -18,7 +18,14 @@ export function AddProjectModal({
   onClose: () => void;
   onCreated: () => void;
 }) {
-  const [tab, setTab] = useState<'pick' | 'path' | 'new'>('pick');
+  type Tab = 'pick' | 'path' | 'new';
+  const TABS: readonly [Tab, string][] = [
+    ['pick', 'Your repos'],
+    ['new', 'New project'],
+    ['path', 'Paste a path'],
+  ];
+  const [tab, setTab] = useState<Tab>('pick');
+  const tabRefs = useRef<Partial<Record<Tab, HTMLButtonElement | null>>>({});
   const [value, setValue] = useState('');
   const [busy, setBusy] = useState(false);
   const [busyPath, setBusyPath] = useState<string | null>(null);
@@ -106,18 +113,38 @@ export function AddProjectModal({
         <h2 id="add-project-title" className="text-sm font-semibold text-ink">
           Add project
         </h2>
-        <div className="mt-3 flex gap-1" role="tablist" aria-label="Project source">
-          {(
-            [
-              ['pick', 'Your repos'],
-              ['new', 'New project'],
-              ['path', 'Paste a path'],
-            ] as const
-          ).map(([t, label]) => (
+        <div
+          className="mt-3 flex gap-1"
+          role="tablist"
+          aria-label="Project source"
+          onKeyDown={(e) => {
+            // Roving tabindex + arrow keys (selection follows focus).
+            const order = TABS.map(([t]) => t);
+            const i = order.indexOf(tab);
+            let next: Tab | undefined;
+            if (e.key === 'ArrowRight') next = order[(i + 1) % order.length];
+            else if (e.key === 'ArrowLeft') next = order[(i - 1 + order.length) % order.length];
+            else if (e.key === 'Home') next = order[0];
+            else if (e.key === 'End') next = order[order.length - 1];
+            if (next) {
+              e.preventDefault();
+              setTab(next);
+              setErr(null);
+              tabRefs.current[next]?.focus();
+            }
+          }}
+        >
+          {TABS.map(([t, label]) => (
             <button
               key={t}
+              ref={(el) => {
+                tabRefs.current[t] = el;
+              }}
               role="tab"
+              id={`add-project-tab-${t}`}
+              aria-controls={`add-project-panel-${t}`}
               aria-selected={tab === t}
+              tabIndex={tab === t ? 0 : -1}
               onClick={() => {
                 setTab(t);
                 setErr(null);
@@ -132,7 +159,12 @@ export function AddProjectModal({
         </div>
 
         {tab === 'pick' && (
-          <div className="mt-3">
+          <div
+            className="mt-3"
+            role="tabpanel"
+            id="add-project-panel-pick"
+            aria-labelledby="add-project-tab-pick"
+          >
             <input
               autoFocus
               value={query}
@@ -143,11 +175,13 @@ export function AddProjectModal({
             />
             <div
               className="mt-2 max-h-80 overflow-y-auto rounded-panel ring-1 ring-line"
-              role="listbox"
+              role="group"
               aria-label="Discovered git repos"
             >
               {repos === null && (
-                <p className="px-3 py-4 text-xs text-faint">scanning your projects…</p>
+                <p role="status" className="px-3 py-4 text-xs text-faint">
+                  scanning your projects…
+                </p>
               )}
               {repos !== null && filtered.length === 0 && (
                 <p className="px-3 py-4 text-xs leading-relaxed text-faint">
@@ -163,8 +197,6 @@ export function AddProjectModal({
               {filtered.map((r) => (
                 <button
                   key={r.path}
-                  role="option"
-                  aria-selected={false}
                   disabled={r.registered || busyPath !== null}
                   onClick={() => void addRepo(r)}
                   title={r.path}
@@ -189,7 +221,9 @@ export function AddProjectModal({
                         <span
                           className="size-1.5 shrink-0 rounded-full bg-copper"
                           title="Has uncommitted changes"
-                        />
+                        >
+                          <span className="sr-only">has uncommitted changes</span>
+                        </span>
                       )}
                     </span>
                     <span className="block truncate text-[11px] text-faint">{r.path}</span>
@@ -214,7 +248,11 @@ export function AddProjectModal({
         )}
 
         {tab !== 'pick' && (
-          <>
+          <div
+            role="tabpanel"
+            id={`add-project-panel-${tab}`}
+            aria-labelledby={`add-project-tab-${tab}`}
+          >
             <label className="mt-3 flex flex-col gap-1 text-[11px] text-faint">
               {tab === 'path' ? 'absolute path to a git repo' : 'project name'}
               <input
@@ -239,7 +277,7 @@ export function AddProjectModal({
                 Creates a fresh git repo under ~/Projects with a VISION.md template.
               </p>
             )}
-          </>
+          </div>
         )}
 
         {err && (

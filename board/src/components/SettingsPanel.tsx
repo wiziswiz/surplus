@@ -519,9 +519,9 @@ export function SettingsPanel({
 
             <Section title="Providers">
               <div className="flex flex-col gap-3 rounded-card bg-overlay p-4">
-                <span className="text-xs font-semibold uppercase tracking-[0.15em] text-ember">
+                <h4 className="text-xs font-semibold uppercase tracking-[0.15em] text-ember">
                   claude
-                </span>
+                </h4>
                 <div className="grid grid-cols-2 gap-4">
                   <SelectField
                     id="set-claudeModel"
@@ -540,9 +540,9 @@ export function SettingsPanel({
                 </div>
               </div>
               <div className="flex flex-col gap-3 rounded-card bg-overlay p-4">
-                <span className="text-xs font-semibold uppercase tracking-[0.15em] text-jade">
+                <h4 className="text-xs font-semibold uppercase tracking-[0.15em] text-jade">
                   codex
-                </span>
+                </h4>
                 <Toggle
                   id="set-codexEnabled"
                   label="Enabled"

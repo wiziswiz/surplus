@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import type { ConfigDto, ProjectDto, ProviderPref, TaskDto, TaskStatus } from '../types';
 import { effectiveModelEffort, fmtRel, PROVIDER_TINT, scoreColor } from '../lib';
 import { useNow } from '../useNow';
@@ -18,7 +18,12 @@ export function ScoreRing({ score }: { score: number }) {
   const r = 6;
   const c = 2 * Math.PI * r;
   return (
-    <span className="inline-flex items-center gap-1" title={`judge ${score}/5`}>
+    <span
+      role="img"
+      aria-label={`Judge score ${score} of 5`}
+      className="inline-flex items-center gap-1"
+      title={`judge ${score}/5`}
+    >
       <svg width="16" height="16" viewBox="0 0 16 16" className="-rotate-90" aria-hidden="true">
         <circle cx="8" cy="8" r={r} fill="none" stroke="var(--color-line)" strokeWidth="2.5" />
         <circle
@@ -40,7 +45,12 @@ export function ScoreRing({ score }: { score: number }) {
 export function AttemptDots({ attempts, max }: { attempts: number; max: number }) {
   const total = Math.min(6, Math.max(max, attempts, 1));
   return (
-    <span className="flex items-center gap-0.5" title={`${attempts}/${max} attempts`}>
+    <span
+      role="img"
+      aria-label={`${attempts} of ${max} attempts used`}
+      className="flex items-center gap-0.5"
+      title={`${attempts}/${max} attempts`}
+    >
       {Array.from({ length: total }).map((_, i) => (
         <span
           key={i}
@@ -76,6 +86,7 @@ export function TaskCard({
   const running = task.status === 'running';
   const { model, effort } = effectiveModelEffort(task, config);
   const [menu, setMenu] = useState(false);
+  const menuBtnRef = useRef<HTMLButtonElement>(null);
 
   return (
     <article
@@ -101,6 +112,7 @@ export function TaskCard({
         </h3>
         <div className="relative shrink-0">
           <button
+            ref={menuBtnRef}
             aria-label={`Actions for ${task.title}`}
             aria-haspopup="menu"
             aria-expanded={menu}
@@ -127,6 +139,13 @@ export function TaskCard({
                 aria-label="Task actions"
                 className="absolute right-0 top-6 z-(--z-dropdown) w-36 rounded-card bg-raised p-1 shadow-lg ring-1 ring-line"
                 onClick={(e) => e.stopPropagation()}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') {
+                    e.stopPropagation();
+                    setMenu(false);
+                    menuBtnRef.current?.focus();
+                  }
+                }}
               >
                 <p className="px-2 pb-0.5 pt-1 text-[10px] uppercase tracking-[0.12em] text-faint">
                   move to

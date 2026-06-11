@@ -13,14 +13,16 @@
 
   --color-ink: oklch(0.95 0.012 75); /* never pure white */
   --color-dim: oklch(0.7 0.014 65);
-  --color-faint: oklch(0.5 0.012 60);
+  /* 0.63 = ≥4.5:1 on base/raised/overlay/active (0.5 hit ~3:1 — WCAG 1.4.3 fail) */
+  --color-faint: oklch(0.63 0.012 60);
 
   /* Warm amber/copper accent family (claude) + jade/teal secondary (codex) */
   --color-ember: oklch(0.78 0.145 70);
   --color-copper: oklch(0.65 0.125 50);
   --color-burn: oklch(0.6 0.19 35);
   --color-jade: oklch(0.76 0.115 175);
-  --color-danger: oklch(0.6 0.2 27);
+  /* 0.7/0.19 = ≥4.5:1 as text on surfaces AND on /10–/25 danger tints (0.6/0.2 hit 3.2–4.4) */
+  --color-danger: oklch(0.7 0.19 27);
 
   /* Non-uniform radii: cards 8 / chips 4 / floating panels 12 */
   --radius-card: 8px;

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import type { ConfigDto, ProjectDto, TaskDto, TaskStatus } from '../types';
 import { TaskCard } from './TaskCard';
 
@@ -192,10 +192,18 @@ function AddTaskInline({
   const [title, setTitle] = useState('');
   const [projectId, setProjectId] = useState('');
   const [err, setErr] = useState<string | null>(null);
+  const addBtnRef = useRef<HTMLButtonElement>(null);
+
+  const dismiss = () => {
+    setOpen(false);
+    // The "+ Add task" button re-mounts in this form's place; return focus there.
+    window.setTimeout(() => addBtnRef.current?.focus(), 0);
+  };
 
   if (!open) {
     return (
       <button
+        ref={addBtnRef}
         onClick={() => {
           setOpen(true);
           setErr(null);
@@ -220,14 +228,19 @@ function AddTaskInline({
   };
 
   return (
-    <div className="flex flex-col gap-1.5 rounded-card bg-overlay p-2 shadow-sm">
+    <div
+      className="flex flex-col gap-1.5 rounded-card bg-overlay p-2 shadow-sm"
+      onKeyDown={(e) => {
+        // Escape works from the select / buttons too, not just the title input.
+        if (e.key === 'Escape') dismiss();
+      }}
+    >
       <input
         autoFocus
         value={title}
         onChange={(e) => setTitle(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === 'Enter') void submit();
-          if (e.key === 'Escape') setOpen(false);
         }}
         aria-label="Task title"
         placeholder="Task title…"
@@ -259,7 +272,7 @@ function AddTaskInline({
           Add
         </button>
         <button
-          onClick={() => setOpen(false)}
+          onClick={dismiss}
           className="rounded-chip px-2.5 py-1 text-xs text-faint transition-colors duration-150 hover:text-dim"
         >
           Cancel

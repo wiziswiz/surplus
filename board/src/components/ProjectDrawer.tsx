@@ -204,7 +204,7 @@ export function ProjectDrawer({
           )}
 
           <section className="flex flex-col gap-2">
-            <h3 className="text-[11px] uppercase tracking-[0.12em] text-faint">VISION.md</h3>
+            <h2 className="text-[11px] uppercase tracking-[0.12em] text-faint">VISION.md</h2>
             {vision === null && !visionErr ? (
               <p className="text-sm text-dim">Loading…</p>
             ) : (
@@ -260,7 +260,7 @@ export function ProjectDrawer({
               }
               className={`rounded-chip px-3 py-1.5 text-xs font-medium transition-colors duration-150 disabled:opacity-50 ${
                 confirming
-                  ? 'bg-danger/20 text-danger hover:bg-danger/30'
+                  ? 'bg-danger/20 text-danger hover:bg-danger/25'
                   : 'text-faint hover:bg-danger/10 hover:text-danger'
               }`}
             >
