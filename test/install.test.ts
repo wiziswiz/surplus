@@ -26,10 +26,16 @@ vi.mock('node:os', async (importOriginal) => {
 
 import { tmpdir } from 'node:os'; // real tmpdir (mock spreads the actual module)
 import {
+  BOARD_LAUNCHD_LABEL,
   LAUNCHD_LABEL,
+  installDockApp,
   installLaunchd,
   launchdPlistPath,
+  renderBoardPlist,
+  renderDockAppInfoPlist,
+  renderDockAppLauncher,
   renderPlist,
+  uninstallDockApp,
   uninstallLaunchd,
 } from '../src/install.js';
 
@@ -137,5 +143,50 @@ describe('uninstallLaunchd', () => {
   it('returns false and ignores unload errors when nothing was installed', () => {
     h.failUnload = true;
     expect(uninstallLaunchd()).toBe(false);
+  });
+});
+
+describe('renderBoardPlist', () => {
+  it('renders a KeepAlive RunAtLoad service with the board port', () => {
+    const xml = renderBoardPlist({
+      nodePath: '/usr/local/bin/node',
+      scriptPath: '/repo/bin/surplus.js',
+      port: 4242,
+      logPath: '/home/.surplus/logs/board-launchd.log',
+    });
+    expect(xml).toContain(`<string>${BOARD_LAUNCHD_LABEL}</string>`);
+    expect(xml).toContain('<key>KeepAlive</key>\n  <true/>');
+    expect(xml).toContain('<key>RunAtLoad</key>\n  <true/>');
+    expect(xml).toContain('<string>board</string>');
+    expect(xml).toContain('<string>--port</string>');
+    expect(xml).toContain('<string>4242</string>');
+  });
+});
+
+describe('dock app', () => {
+  it('Info.plist names the launch executable and bundle id', () => {
+    const xml = renderDockAppInfoPlist();
+    expect(xml).toContain('<string>Surplus</string>');
+    expect(xml).toContain('<string>launch</string>');
+    expect(xml).toContain('<string>com.surplus.dock</string>');
+  });
+
+  it('launcher kickstarts the board service and opens the dashboard, no secrets', () => {
+    const sh = renderDockAppLauncher(4242);
+    expect(sh).toContain(`gui/$(id -u)/${BOARD_LAUNCHD_LABEL}`);
+    expect(sh).toContain('open "http://localhost:4242"');
+    expect(sh).not.toMatch(/token|sk-ant/i);
+  });
+
+  it('installDockApp writes an executable bundle into the given dir; uninstall removes it', () => {
+    const appsDir = join(h.tmpHome, 'Applications');
+    const app = installDockApp({ port: 5151, applicationsDir: appsDir });
+    expect(app).toBe(join(appsDir, 'Surplus.app'));
+    expect(readFileSync(join(app, 'Contents', 'Info.plist'), 'utf8')).toContain('Surplus');
+    const launcher = readFileSync(join(app, 'Contents', 'MacOS', 'launch'), 'utf8');
+    expect(launcher).toContain('http://localhost:5151');
+    expect(uninstallDockApp(appsDir)).toBe(true);
+    expect(existsSync(app)).toBe(false);
+    expect(uninstallDockApp(appsDir)).toBe(false);
   });
 });

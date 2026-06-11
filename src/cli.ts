@@ -38,7 +38,14 @@ import { parseVision, draftVision, scaffoldProject as scaffoldProjectDir } from 
 import { judgeRun } from './judge.js';
 import { startServer, applyConfigPatch } from './server.js';
 import type { ServerDb, ConfigPatch } from './server.js';
-import { installLaunchd, uninstallLaunchd } from './install.js';
+import {
+  installBoardLaunchd,
+  installDockApp,
+  installLaunchd,
+  uninstallBoardLaunchd,
+  uninstallDockApp,
+  uninstallLaunchd,
+} from './install.js';
 
 const VERSION = '0.1.0';
 const PROVIDERS: Provider[] = ['claude', 'codex'];
@@ -770,26 +777,47 @@ program
 
 program
   .command('install')
-  .description('Install the launchd agent that runs `surplus tick` on an interval')
+  .description('Install launchd agents: the tick scheduler, and optionally the always-on board + Dock app')
   .option('--interval <min>', 'tick interval in minutes', '15')
+  .option('--board', 'also install the always-on board service (KeepAlive) and /Applications/Surplus.app')
+  .option('--board-only', 'install only the board service + Dock app, not the tick scheduler')
   .action(
-    wrap((opts: { interval: string }) => {
+    wrap((opts: { interval: string; board?: boolean; boardOnly?: boolean }) => {
       const minutes = Number.parseInt(opts.interval, 10);
       if (Number.isNaN(minutes) || minutes <= 0) throw new Error(`invalid --interval: ${opts.interval}`);
       ensureDirs();
-      const plist = installLaunchd({ intervalMinutes: minutes });
-      console.log(`Installed launchd agent: ${plist} (tick every ${minutes}m)`);
-      console.log('Logs: ~/.surplus/logs/launchd.log — `surplus uninstall` to remove.');
+      if (!opts.boardOnly) {
+        const plist = installLaunchd({ intervalMinutes: minutes });
+        console.log(`Installed tick agent: ${plist} (every ${minutes}m)`);
+        console.log('Logs: ~/.surplus/logs/launchd.log');
+      }
+      if (opts.board || opts.boardOnly) {
+        const config = loadConfig();
+        const boardPlist = installBoardLaunchd({ port: config.board.port });
+        console.log(`Installed always-on board service: ${boardPlist}`);
+        console.log(`Dashboard: http://localhost:${config.board.port} (starts at login, restarts if it dies)`);
+        const app = installDockApp({ port: config.board.port });
+        console.log(`Installed Dock app: ${app}`);
+      }
+      console.log('`surplus uninstall` removes everything.');
     }),
   );
 
 program
   .command('uninstall')
-  .description('Unload and remove the launchd agent')
+  .description('Unload and remove the launchd agents and the Dock app')
   .action(
     wrap(() => {
-      const existed = uninstallLaunchd();
-      console.log(existed ? 'Removed launchd agent.' : 'No launchd agent was installed.');
+      const tick = uninstallLaunchd();
+      const board = uninstallBoardLaunchd();
+      const app = uninstallDockApp();
+      console.log(
+        [
+          tick ? 'Removed tick agent.' : 'No tick agent was installed.',
+          board ? 'Removed board service.' : 'No board service was installed.',
+          app ? 'Removed Dock app.' : 'No Dock app was installed.',
+        ].join(' '),
+      );
     }),
   );
 
