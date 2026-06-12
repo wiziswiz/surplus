@@ -279,7 +279,12 @@ the token are redacted.
 Each registered project gets a `VISION.md` (template in
 [`templates/VISION.md`](templates/VISION.md)) — the autoresearch `program.md`
 idea: a charter the worker re-reads every session and the judge scores
-against. It has five sections plus optional frontmatter
+against. Edit it right on the board — click any project's name chip (or
+Projects in the header) to open the project drawer:
+
+<img src="docs/project-drawer.png" alt="The project drawer: provider preference, model/effort overrides, and the VISION.md editor" width="700">
+
+It has five sections plus optional frontmatter
 (`provider` / `model` / `effort` overrides):
 
 - **Vision** — one paragraph describing the *finished* state, written as
