@@ -610,6 +610,11 @@ fn main() {
                 item_arm,
             })));
 
+            // Launching the app opens the board window — a tray-only launch
+            // reads as "nothing happened". The tray stays alive after the
+            // window is closed; Quit lives in the tray menu.
+            open_board(app.handle(), false);
+
             // First paint + poll loop.
             let handle = app.handle().clone();
             refresh(&handle, false);
@@ -622,13 +627,20 @@ fn main() {
         })
         .build(tauri::generate_context!())
         .expect("error while building surplus menu-bar app")
-        .run(|_app, event| {
-            // Closing the board window must not quit a tray app; explicit
-            // Quit (app.exit(0)) carries an exit code and is allowed through.
-            if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
-                if code.is_none() {
-                    api.prevent_exit();
+        .run(|app, event| {
+            match event {
+                // Closing the board window must not quit a tray app; explicit
+                // Quit (app.exit(0)) carries an exit code and is allowed through.
+                tauri::RunEvent::ExitRequested { api, code, .. } => {
+                    if code.is_none() {
+                        api.prevent_exit();
+                    }
                 }
+                // Double-clicking the app in Applications/Spotlight while it's
+                // already running: reopen the board instead of doing nothing.
+                #[cfg(target_os = "macos")]
+                tauri::RunEvent::Reopen { .. } => open_board(app, false),
+                _ => {}
             }
         });
 }
