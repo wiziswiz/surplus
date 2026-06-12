@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react';
 import type { ConfigDto, ProjectDto, ProviderPref, TaskDto, TaskStatus } from '../types';
-import { effectiveModelEffort, fmtRel, PROVIDER_TINT, scoreColor } from '../lib';
+import { effectiveModelEffort, fmtRel, providerTint, scoreColor } from '../lib';
 import { useNow } from '../useNow';
 
 /** WCAG 2.5.7 non-drag alternative targets ('running' is dispatcher-only). */
@@ -8,7 +8,7 @@ const MOVE_TARGETS: TaskStatus[] = ['triage', 'todo', 'ready', 'blocked', 'done'
 
 export function ProviderBadge({ pref }: { pref: ProviderPref }) {
   return (
-    <span className={`rounded-chip px-1.5 py-0.5 text-xs font-medium ${PROVIDER_TINT[pref]}`}>
+    <span className={`rounded-chip px-1.5 py-0.5 text-xs font-medium ${providerTint(pref)}`}>
       {pref}
     </span>
   );

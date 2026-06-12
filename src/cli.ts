@@ -5,16 +5,16 @@
  * ~/.surplus at import time — side effects happen only inside command actions
  * (so `surplus --help` stays pure).
  */
-import { Command, Option } from 'commander';
+import { Command, InvalidArgumentError, Option } from 'commander';
 import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 
 import type {
+  AccountAdapter,
   Decision,
   ProjectRow,
   Provider,
-  ProviderAdapter,
   ProviderPref,
   SurplusConfig,
   TaskEventRow,
@@ -32,8 +32,8 @@ import { openDb } from './db.js';
 import type { SurplusDb, TaskPatch } from './db.js';
 import { dispatchTick } from './dispatcher.js';
 import type { DispatchDeps, DispatchResult } from './dispatcher.js';
-import { claudeAdapter } from './providers/claude.js';
-import { codexAdapter } from './providers/codex.js';
+import { claudeAccountAdapters } from './providers/claude.js';
+import { codexAccountAdapter } from './providers/codex.js';
 import { parseVision, draftVision, scaffoldProject as scaffoldProjectDir } from './vision.js';
 import { judgeRun } from './judge.js';
 import { startServer, applyConfigPatch } from './server.js';
@@ -50,8 +50,10 @@ import {
 } from './install.js';
 
 const VERSION = '0.1.0';
-const PROVIDERS: Provider[] = ['claude', 'codex'];
 const TASK_STATUSES: TaskStatus[] = ['triage', 'todo', 'ready', 'running', 'blocked', 'done', 'archived'];
+
+/** Task/project affinity grammar: provider, 'any', or a claude account key. */
+const PROVIDER_PREF_RE = /^(claude|codex|any|claude:[a-z0-9-]{1,24})$/;
 
 // ---------------------------------------------------------------------------
 // Shared deps (built once per action, never at import time)
@@ -77,13 +79,16 @@ function buildDeps(nowFn: () => number = () => Date.now()): CliDeps {
   ensureDirs();
   const config: SurplusConfig = loadConfig();
   const db: SurplusDb = openDb();
-  const adapters: Partial<Record<Provider, ProviderAdapter>> = {};
-  if (config.providers.claude.enabled) adapters.claude = claudeAdapter(config);
-  if (config.providers.codex.enabled) adapters.codex = codexAdapter(config);
+  // One adapter per burnable account: every enabled claude account (main
+  // keeps key 'claude'), plus the single codex account when enabled.
+  const accounts: AccountAdapter[] = [
+    ...claudeAccountAdapters(config),
+    ...(config.providers.codex.enabled ? [codexAccountAdapter(config)] : []),
+  ];
   return {
     db,
     config,
-    adapters,
+    accounts,
     decideFn: decide,
     judgeRun: (args) =>
       judgeRun({
@@ -111,21 +116,35 @@ function buildDeps(nowFn: () => number = () => Date.now()): CliDeps {
   };
 }
 
-function enabledProviders(deps: CliDeps): Provider[] {
-  return PROVIDERS.filter((p) => Boolean(deps.adapters[p]));
+/**
+ * Reject a 'claude:<id>' affinity that names no configured account — a task
+ * or project pinned to it would sit in 'ready' forever (the claim predicate
+ * never matches an unknown key, and nothing warns).
+ */
+function assertKnownProviderPref(deps: CliDeps, pref: ProviderPref): void {
+  if (!pref.startsWith('claude:')) return;
+  if (!deps.accounts.some((a) => a.key === pref)) {
+    throw new Error(`unknown claude account '${pref}' — add it to providers.claude.accounts first`);
+  }
+}
+
+/** True when `target` (an account key or provider name) matches a configured account. */
+function matchesAccount(deps: CliDeps, target: string): boolean {
+  return deps.accounts.some((a) => a.key === target || a.provider === target);
 }
 
 /**
- * Provider to force for a manual burn: explicit flag wins, then the task's
- * own affinity (when specific + enabled), then the first enabled provider.
+ * Account key / provider name to force for a manual burn: explicit flag wins,
+ * then the task's own affinity (when specific + matching a configured
+ * account), then the first configured account's key.
  */
-function pickForcedProvider(deps: CliDeps, taskId?: string, explicit?: Provider): Provider | undefined {
+function pickForcedProvider(deps: CliDeps, taskId?: string, explicit?: string): string | undefined {
   if (explicit) return explicit;
   if (taskId) {
     const t = deps.db.getTask(taskId);
-    if (t && t.provider !== 'any' && deps.adapters[t.provider]) return t.provider;
+    if (t && t.provider !== 'any' && matchesAccount(deps, t.provider)) return t.provider;
   }
-  return enabledProviders(deps)[0];
+  return deps.accounts[0]?.key;
 }
 
 // ---------------------------------------------------------------------------
@@ -217,41 +236,41 @@ function unavailableSnapshot(provider: Provider, nowMs: number, error: string): 
   };
 }
 
+/** Per-ACCOUNT usage snapshots keyed by account key. */
 async function fetchUsage(
   deps: CliDeps,
-  providers: Provider[],
-): Promise<Partial<Record<Provider, UsageSnapshot>>> {
-  const out: Partial<Record<Provider, UsageSnapshot>> = {};
+  accounts: AccountAdapter[],
+): Promise<Record<string, UsageSnapshot>> {
+  const out: Record<string, UsageSnapshot> = {};
   await Promise.all(
-    providers.map(async (p) => {
-      const adapter = deps.adapters[p];
-      if (!adapter) return;
+    accounts.map(async (account) => {
       let snap: UsageSnapshot | null = null;
       try {
-        snap = await adapter.getUsage();
+        snap = await account.getUsage();
       } catch {
-        out[p] = unavailableSnapshot(p, deps.now(), 'adapter-error');
+        out[account.key] = unavailableSnapshot(account.provider, deps.now(), 'adapter-error');
         return;
       }
-      out[p] = snap ?? unavailableSnapshot(p, deps.now(), 'no-credentials');
+      out[account.key] = snap ?? unavailableSnapshot(account.provider, deps.now(), 'no-credentials');
     }),
   );
   return out;
 }
 
 /**
- * What the dispatcher would claim next for a provider (display only — the real
- * claim is db.claimNextReadyTask). Mirrors its exclusions: ready,
- * provider-compatible, not scheduled into the future, parent done when set,
- * project has no running task; lowest priority number then oldest first.
+ * What the dispatcher would claim next for an account (display only — the
+ * real claim is db.claimNextReadyTask). Mirrors its exclusions: ready,
+ * affinity-compatible ('any' | provider | account key), not scheduled into
+ * the future, parent done when set, project has no running task; lowest
+ * priority number then oldest first.
  */
-function nextClaimable(deps: CliDeps, provider: Provider, nowMs: number): TaskRow | null {
+function nextClaimable(deps: CliDeps, account: AccountAdapter, nowMs: number): TaskRow | null {
   const ready = deps.db.listTasks({ status: 'ready' });
   const doneIds = new Set(deps.db.listTasks({ status: 'done' }).map((t) => t.id));
   const runningProjects = new Set(deps.db.listTasks({ status: 'running' }).map((t) => t.projectId));
   const eligible = ready.filter(
     (t) =>
-      (t.provider === 'any' || t.provider === provider) &&
+      (t.provider === 'any' || t.provider === account.provider || t.provider === account.key) &&
       (t.scheduledAt === null || t.scheduledAt <= nowMs) &&
       (t.parentId === null || doneIds.has(t.parentId)) &&
       !runningProjects.has(t.projectId),
@@ -273,8 +292,16 @@ function wrap<A extends unknown[]>(
   };
 }
 
+/** Affinity option validating the extended grammar (claude|codex|any|claude:<id>). */
 const providerPrefOption = (description: string) =>
-  new Option('--provider <provider>', description).choices(['claude', 'codex', 'any']).default('any');
+  new Option('--provider <provider>', `${description} (claude|codex|any|claude:<account-id>)`)
+    .argParser((value: string): ProviderPref => {
+      if (!PROVIDER_PREF_RE.test(value)) {
+        throw new InvalidArgumentError('must be claude, codex, any, or claude:<account-id>');
+      }
+      return value as ProviderPref;
+    })
+    .default('any');
 
 // ---------------------------------------------------------------------------
 // ServerDb adapter (SurplusDb → the structural interface server.ts expects)
@@ -377,19 +404,19 @@ program
       }
       const deps = buildDeps(nowFn);
       const paused = isPaused();
-      const providers = enabledProviders(deps);
-      if (providers.length === 0) {
+      if (deps.accounts.length === 0) {
         console.log('no providers enabled — see `surplus config`');
         return;
       }
-      const usage = await fetchUsage(deps, providers);
-      const burning: Provider[] = [];
-      for (const p of providers) {
-        const u = usage[p]!;
+      const usage = await fetchUsage(deps, deps.accounts);
+      const burning: AccountAdapter[] = [];
+      const pad = Math.max(7, ...deps.accounts.map((a) => a.key.length));
+      for (const account of deps.accounts) {
+        const u = usage[account.key]!;
         const d: Decision = decide({ usage: u, config: deps.config, now: deps.now(), paused });
-        console.log(`${p.padEnd(7)} ${usageLine(u, deps.now())}`);
-        console.log(`        → ${decisionLine(d)}`);
-        if (d.action === 'burn') burning.push(p);
+        console.log(`${account.key.padEnd(pad)} ${usageLine(u, deps.now())}`);
+        console.log(`${' '.repeat(pad)} → ${decisionLine(d)}`);
+        if (d.action === 'burn') burning.push(account);
       }
       if (paused) console.log('paused: yes (~/.surplus/PAUSED)');
       if (burning.length === 0) {
@@ -398,18 +425,18 @@ program
       }
       if (opts.dryRun) {
         const projects = new Map(deps.db.listProjects().map((pr) => [pr.id, pr.name] as const));
-        for (const p of burning) {
-          const next = nextClaimable(deps, p, deps.now());
+        for (const account of burning) {
+          const next = nextClaimable(deps, account, deps.now());
           console.log(
             next
-              ? `${p}: would claim ${next.id} "${truncate(next.title, 60)}" ` +
+              ? `${account.key}: would claim ${next.id} "${truncate(next.title, 60)}" ` +
                   `(priority ${next.priority}, project ${projects.get(next.projectId) ?? next.projectId})`
-              : `${p}: burn window open but no claimable task`,
+              : `${account.key}: burn window open but no claimable task`,
           );
         }
         return;
       }
-      console.log(`dispatching (${burning.join(', ')})…`);
+      console.log(`dispatching (${burning.map((a) => a.key).join(', ')})…`);
       printDispatchResult(await dispatchTick(deps));
     }),
   );
@@ -423,18 +450,18 @@ program
     wrap(async () => {
       const deps = buildDeps();
       const paused = isPaused();
-      const providers = enabledProviders(deps);
-      if (providers.length === 0) {
+      if (deps.accounts.length === 0) {
         console.log('no providers enabled — see `surplus config`');
       } else {
-        const usage = await fetchUsage(deps, providers);
+        const usage = await fetchUsage(deps, deps.accounts);
         printTable(
-          ['PROVIDER', 'PLAN', '5H', 'RESET', '7D', 'RESET', 'DECISION'],
-          providers.map((p) => {
-            const u = usage[p]!;
+          ['ACCOUNT', 'LABEL', 'PLAN', '5H', 'RESET', '7D', 'RESET', 'DECISION'],
+          deps.accounts.map((account) => {
+            const u = usage[account.key]!;
             const d = decide({ usage: u, config: deps.config, now: deps.now(), paused });
             return [
-              p,
+              account.key,
+              account.label,
               u.planName ?? '—',
               u.unavailable ? '!' : fmtPct(u.fiveHourPct),
               fmtCountdown(u.fiveHourResetsAt, deps.now()),
@@ -519,6 +546,7 @@ program
         throw new Error(`not a git repository: ${projPath} (run \`git init\` first)`);
       }
       const deps = buildDeps();
+      assertKnownProviderPref(deps, opts.provider);
       const name = opts.name ?? basename(projPath);
       const id = slugify(name);
       const visionPath = join(projPath, 'VISION.md');
@@ -557,6 +585,7 @@ program
   .action(
     wrap(async (name: string, opts: { provider: ProviderPref; model?: string; effort?: string }) => {
       const deps = buildDeps();
+      assertKnownProviderPref(deps, opts.provider);
       const slug = slugify(name);
       const dir = join(homedir(), 'Projects', slug);
       if (existsSync(dir)) {
@@ -619,6 +648,7 @@ taskCmd
         },
       ) => {
         const deps = buildDeps();
+        assertKnownProviderPref(deps, opts.provider);
         const project = deps.db.getProject(projectId);
         if (!project) {
           throw new Error(`unknown project: ${projectId} (register it with \`surplus add\` first)`);
@@ -674,16 +704,22 @@ program
   .command('burn')
   .description('Manual one-shot dispatch, outside the launchd schedule')
   .option('--task <id>', 'run this specific ready task')
-  .addOption(new Option('--provider <provider>', 'force this provider').choices(['claude', 'codex']))
+  .option(
+    '--provider <providerOrAccount>',
+    'force this provider or account key (claude|codex|claude:<account-id>)',
+  )
   .option('--force', 'bypass burn-window checks (never bypasses pause)')
   .action(
-    wrap(async (opts: { task?: string; provider?: Provider; force?: boolean }) => {
+    wrap(async (opts: { task?: string; provider?: string; force?: boolean }) => {
       const deps = buildDeps();
       if (isPaused()) {
         throw new Error('surplus is paused (~/.surplus/PAUSED) — run `surplus resume` first');
       }
-      if (opts.provider && !deps.adapters[opts.provider]) {
-        throw new Error(`provider ${opts.provider} is not enabled — see \`surplus config\``);
+      if (opts.provider && !matchesAccount(deps, opts.provider)) {
+        throw new Error(
+          `provider/account ${opts.provider} is not configured — ` +
+            `expected one of: ${deps.accounts.map((a) => a.key).join(', ') || '(none enabled)'}`,
+        );
       }
       if (opts.task) {
         const t = deps.db.getTask(opts.task);
@@ -692,22 +728,26 @@ program
           console.error(`warning: task ${opts.task} is '${t.status}', not 'ready' — the claim may fail`);
         }
       }
-      const targets = opts.provider ? [opts.provider] : enabledProviders(deps);
+      const targets = opts.provider
+        ? deps.accounts.filter((a) => a.key === opts.provider || a.provider === opts.provider)
+        : deps.accounts;
       if (targets.length === 0) throw new Error('no providers enabled — see `surplus config`');
       const usage = await fetchUsage(deps, targets);
-      for (const p of targets) {
-        const u = usage[p];
+      for (const account of targets) {
+        const u = usage[account.key];
         if (u?.unavailable) {
-          const timeGated = p === 'codex' && deps.config.providers.codex.weeklyResetFallback != null;
+          const timeGated =
+            account.provider === 'codex' && deps.config.providers.codex.weeklyResetFallback != null;
           console.error(
-            `warning: ${p} usage unavailable (${u.error ?? 'unknown'})` +
+            `warning: ${account.key} usage unavailable (${u.error ?? 'unknown'})` +
               `${timeGated ? ' — time-gated via weeklyResetFallback' : ''}, proceeding` +
               `${opts.force ? ' (--force)' : ''}`,
           );
         }
       }
-      // --provider or --force skips decide() gating (forceProvider); plain
-      // `burn --task X` still respects burn windows, only the claim is pinned.
+      // --provider or --force skips decide() gating (forceProvider accepts an
+      // account key or a provider name); plain `burn --task X` still respects
+      // burn windows, only the claim is pinned.
       const forceProvider =
         opts.provider ?? (opts.force ? pickForcedProvider(deps, opts.task) : undefined);
       if (forceProvider && !opts.provider) console.log(`forcing provider: ${forceProvider}`);
@@ -730,7 +770,7 @@ program
       if (!Number.isInteger(port) || port <= 0 || port > 65535) {
         throw new Error(`invalid --port: ${opts.port}`);
       }
-      const triggerBurn = (taskId?: string, provider?: Provider): Promise<DispatchResult> =>
+      const triggerBurn = (taskId?: string, provider?: string): Promise<DispatchResult> =>
         dispatchTick({
           ...deps,
           forceTaskId: taskId,
@@ -741,7 +781,7 @@ program
         port,
         db: toServerDb(deps.db),
         config: deps.config,
-        adapters: deps.adapters,
+        accounts: deps.accounts,
         decideFn: decide,
         paused: () => isPaused(),
         setPaused: (b: boolean) => setPaused(b),
@@ -770,6 +810,18 @@ program
           updateConfig: (patch: ConfigPatch) => {
             const next = applyConfigPatch(loadConfig(), patch);
             saveConfig(next);
+            // Rebuild the live account adapters IN PLACE (the array reference
+            // is shared with startServer and triggerBurn) so account
+            // add/remove/priority edits show up in /api/state — and are
+            // burnable — without restarting the board. Adapters are stateless
+            // wrappers (usage caches live on disk, keyed per account), so
+            // rebuilding them is free.
+            deps.accounts.splice(
+              0,
+              deps.accounts.length,
+              ...claudeAccountAdapters(next),
+              ...(next.providers.codex.enabled ? [codexAccountAdapter(next)] : []),
+            );
             return next;
           },
           scheduler: {

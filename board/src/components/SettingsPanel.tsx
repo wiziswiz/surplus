@@ -1,7 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
-import { getBoardService, installBoardService, patchConfig } from '../api';
-import type { BoardServiceDto, ConfigDto, ConfigPatchDto } from '../types';
+import { getBoardService, getState, installBoardService, patchConfig } from '../api';
+import type {
+  BoardServiceDto,
+  ClaudeAccountDto,
+  ConfigDto,
+  ConfigPatchDto,
+  StateDto,
+} from '../types';
 import { EFFORT_OPTIONS, MODEL_OPTIONS } from '../lib';
 import { SlideOver } from './SlideOver';
 
@@ -365,15 +371,363 @@ function ServiceSection() {
 }
 
 // ---------------------------------------------------------------------------
+// Claude accounts — multiple subscriptions via Claude Code profile dirs
+// (CLAUDE_CONFIG_DIR). surplus NEVER sees or stores tokens: each profile dir
+// keeps its own Claude Code login, refreshed by Claude Code itself.
+// ---------------------------------------------------------------------------
+
+const ACCOUNT_ID_RE = /^[a-z0-9-]{1,24}$/;
+const MAX_CLAUDE_ACCOUNTS = 6;
+
+function defaultAccounts(): ClaudeAccountDto[] {
+  return [{ id: 'main', label: 'personal', configDir: null, priority: null }];
+}
+
+/** AccountKey for a claude account id ('main' keeps the legacy key 'claude'). */
+function accountKeyOf(id: string): string {
+  return id === 'main' ? 'claude' : `claude:${id}`;
+}
+
+function loginCommand(id: string): string {
+  return `CLAUDE_CONFIG_DIR=~/.surplus/profiles/${id} claude`;
+}
+
+function UsageIndicator({ ok }: { ok: boolean }) {
+  return (
+    <span
+      className={`inline-flex shrink-0 items-center gap-1.5 text-xs ${ok ? 'text-jade' : 'text-faint'}`}
+    >
+      <span
+        aria-hidden="true"
+        className={`h-1.5 w-1.5 rounded-full ${ok ? 'bg-jade' : 'bg-line'}`}
+      />
+      {ok ? 'usage ok' : 'no usage'}
+    </span>
+  );
+}
+
+function AccountsSection({
+  config,
+  usage,
+  onSaved,
+}: {
+  config: ConfigDto;
+  /** Current /api/state usage map (keyed by AccountKey) for the ok/dead dots. */
+  usage: StateDto['usage'];
+  onSaved: (cfg: ConfigDto) => void;
+}) {
+  const [accounts, setAccounts] = useState<ClaudeAccountDto[]>(() => {
+    const declared = config.providers.claude.accounts;
+    return declared && declared.length > 0 ? declared : defaultAccounts();
+  });
+  const [prioDrafts, setPrioDrafts] = useState<Record<string, string>>({});
+  const [prioErrs, setPrioErrs] = useState<Record<string, string | null>>({});
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  // Add-account flow.
+  const [newId, setNewId] = useState('');
+  const [newLabel, setNewLabel] = useState('');
+  const [addErr, setAddErr] = useState<string | null>(null);
+  const [addedId, setAddedId] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [checkResult, setCheckResult] = useState<string | null>(null);
+
+  const patchAccounts = async (next: ClaudeAccountDto[]): Promise<boolean> => {
+    setBusy(true);
+    setErr(null);
+    setSaved(false);
+    try {
+      const effective = await patchConfig({ providers: { claude: { accounts: next } } });
+      setAccounts(effective.providers.claude.accounts ?? next);
+      onSaved(effective);
+      setSaved(true);
+      return true;
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'save failed');
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const prioValue = (a: ClaudeAccountDto): string =>
+    prioDrafts[a.id] ?? (a.priority === null ? '' : String(a.priority));
+
+  const commitPriority = (a: ClaudeAccountDto) => {
+    const draft = prioDrafts[a.id];
+    if (draft === undefined) return; // never touched
+    const raw = draft.trim();
+    let next: number | null = null;
+    if (raw !== '') {
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 0 || n > 99) {
+        setPrioErrs((e) => ({ ...e, [a.id]: 'Whole number 0–99, or blank for auto' }));
+        return;
+      }
+      next = n;
+    }
+    setPrioErrs((e) => ({ ...e, [a.id]: null }));
+    if (next === a.priority) return;
+    void patchAccounts(accounts.map((x) => (x.id === a.id ? { ...x, priority: next } : x)));
+  };
+
+  const addAccount = async () => {
+    const id = newId.trim();
+    const label = newLabel.trim() || id;
+    if (!ACCOUNT_ID_RE.test(id)) {
+      setAddErr('Id must be 1–24 lowercase letters, digits or dashes');
+      return;
+    }
+    if (id === 'main' || accounts.some((a) => a.id === id)) {
+      setAddErr(`'${id}' is already taken`);
+      return;
+    }
+    if (accounts.length >= MAX_CLAUDE_ACCOUNTS) {
+      setAddErr(`At most ${MAX_CLAUDE_ACCOUNTS} accounts`);
+      return;
+    }
+    if (label.length > 40) {
+      setAddErr('Label must be at most 40 characters');
+      return;
+    }
+    setAddErr(null);
+    const entry: ClaudeAccountDto = {
+      id,
+      label,
+      configDir: `~/.surplus/profiles/${id}`,
+      priority: null,
+    };
+    if (await patchAccounts([...accounts, entry])) {
+      setAddedId(id);
+      setNewId('');
+      setNewLabel('');
+      setCopied(false);
+      setCheckResult(null);
+    }
+  };
+
+  const checkConnection = async (id: string) => {
+    setChecking(true);
+    setCheckResult(null);
+    try {
+      const s = await getState(true);
+      const snap = s.usage[accountKeyOf(id)];
+      if (snap && !snap.unavailable) {
+        setCheckResult(
+          `connected — ${snap.planName ?? 'plan unknown'} · 7d at ${snap.sevenDayPct ?? '—'}%`,
+        );
+      } else {
+        setCheckResult('not logged in yet');
+      }
+    } catch {
+      setCheckResult('could not reach surplus');
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  return (
+    <Section title="Claude accounts">
+      <p className="-mt-2 max-w-sm text-xs leading-relaxed text-dim">
+        Burn surplus from more than one Claude subscription. Each extra account lives in its
+        own Claude Code profile folder — surplus never sees or stores your tokens.
+      </p>
+
+      <ul className="flex flex-col gap-2">
+        {accounts.map((a) => {
+          const snap = usage[accountKeyOf(a.id)];
+          const ok = Boolean(snap && !snap.unavailable);
+          return (
+            <li key={a.id} className="flex flex-col gap-1 rounded-card bg-overlay p-3">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium text-ink">{a.label}</span>
+                <code className="rounded-chip bg-raised px-1.5 py-0.5 text-[10px] text-dim">
+                  {accountKeyOf(a.id)}
+                </code>
+                <span className="ml-auto" />
+                <UsageIndicator ok={ok} />
+                {a.id !== 'main' && (
+                  <button
+                    onClick={() => void patchAccounts(accounts.filter((x) => x.id !== a.id))}
+                    disabled={busy}
+                    aria-label={`Remove account ${a.label}`}
+                    className="rounded-chip px-2 py-1 text-xs text-faint transition-colors duration-150 hover:bg-danger/10 hover:text-danger disabled:opacity-50"
+                  >
+                    Remove
+                  </button>
+                )}
+              </div>
+              <p className="truncate text-xs text-faint" title={a.configDir ?? undefined}>
+                {a.configDir ?? 'default login (~/.claude)'}
+              </p>
+              <div className="flex items-center gap-2">
+                <label
+                  htmlFor={`acct-prio-${a.id}`}
+                  className="text-xs font-medium text-ink"
+                >
+                  Priority
+                </label>
+                <input
+                  id={`acct-prio-${a.id}`}
+                  type="number"
+                  inputMode="numeric"
+                  min={0}
+                  max={99}
+                  value={prioValue(a)}
+                  onChange={(e) => {
+                    setPrioDrafts((d) => ({ ...d, [a.id]: e.target.value }));
+                    setSaved(false);
+                  }}
+                  onBlur={() => commitPriority(a)}
+                  placeholder="auto"
+                  aria-invalid={prioErrs[a.id] ? true : undefined}
+                  aria-describedby={
+                    prioErrs[a.id] ? `acct-prio-${a.id}-err` : `acct-prio-${a.id}-help`
+                  }
+                  className="field-input w-20"
+                />
+                {!prioErrs[a.id] && (
+                  <span id={`acct-prio-${a.id}-help`} className="text-xs text-faint">
+                    lower burns first; blank = auto (soonest reset first)
+                  </span>
+                )}
+                {prioErrs[a.id] && (
+                  <span id={`acct-prio-${a.id}-err`} role="alert" className="text-xs text-danger">
+                    {prioErrs[a.id]}
+                  </span>
+                )}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+      <span
+        aria-live="polite"
+        className={`-mt-1 text-xs text-jade transition-opacity duration-300 ${saved ? 'opacity-100' : 'opacity-0'}`}
+      >
+        Saved
+      </span>
+      {err && (
+        <p role="alert" className="text-xs text-danger">
+          {err}
+        </p>
+      )}
+
+      {accounts.length < MAX_CLAUDE_ACCOUNTS && (
+        <div className="flex flex-col gap-3 rounded-card bg-overlay p-4">
+          <h4 className="text-xs font-semibold uppercase tracking-[0.15em] text-ember">
+            Add account
+          </h4>
+          <div className="grid grid-cols-2 gap-4">
+            <div className="flex flex-col gap-1">
+              <label htmlFor="acct-new-id" className="text-sm font-medium text-ink">
+                Id
+              </label>
+              <input
+                id="acct-new-id"
+                type="text"
+                value={newId}
+                onChange={(e) => setNewId(e.target.value)}
+                placeholder="work"
+                aria-describedby="acct-new-id-help"
+                className="field-input w-full"
+              />
+              <p id="acct-new-id-help" className="text-xs leading-relaxed text-faint">
+                Short slug: lowercase letters, digits, dashes.
+              </p>
+            </div>
+            <div className="flex flex-col gap-1">
+              <label htmlFor="acct-new-label" className="text-sm font-medium text-ink">
+                Label
+              </label>
+              <input
+                id="acct-new-label"
+                type="text"
+                value={newLabel}
+                onChange={(e) => setNewLabel(e.target.value)}
+                placeholder="Work Max"
+                className="field-input w-full"
+              />
+            </div>
+          </div>
+          <div>
+            <button
+              onClick={() => void addAccount()}
+              disabled={busy || newId.trim() === ''}
+              className="rounded-chip bg-ember/20 px-3 py-1.5 text-xs font-semibold text-ember transition-colors duration-150 hover:bg-ember/30 disabled:opacity-50"
+            >
+              {busy ? 'Adding…' : 'Add account'}
+            </button>
+          </div>
+          {addErr && (
+            <p role="alert" className="text-xs text-danger">
+              {addErr}
+            </p>
+          )}
+
+          {addedId && (
+            <div className="flex flex-col gap-2 border-t border-line pt-3" aria-live="polite">
+              <p className="text-sm font-medium text-ink">
+                Now log in once as &lsquo;{addedId}&rsquo;
+              </p>
+              <div className="flex items-center gap-2">
+                <code className="min-w-0 flex-1 truncate rounded-chip bg-raised px-2 py-1.5 text-[11px] text-dim">
+                  {loginCommand(addedId)}
+                </code>
+                <button
+                  onClick={() => {
+                    void navigator.clipboard.writeText(loginCommand(addedId)).then(() => {
+                      setCopied(true);
+                      window.setTimeout(() => setCopied(false), 1500);
+                    });
+                  }}
+                  aria-live="polite"
+                  className="shrink-0 rounded-chip bg-raised px-2 py-1.5 text-xs text-dim transition-colors duration-150 hover:bg-active hover:text-ink"
+                >
+                  {copied ? 'copied' : 'copy'}
+                </button>
+              </div>
+              <p className="max-w-sm text-xs leading-relaxed text-faint">
+                Run this in Terminal and log in once with the account you want to add. surplus
+                never sees or stores your tokens — Claude Code keeps that login refreshed
+                itself.
+              </p>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => void checkConnection(addedId)}
+                  disabled={checking}
+                  className="rounded-chip bg-raised px-3 py-1.5 text-xs font-medium text-ink transition-colors duration-150 hover:bg-active disabled:opacity-50"
+                >
+                  {checking ? 'Checking…' : 'Check connection'}
+                </button>
+                <span aria-live="polite" className="text-xs text-dim">
+                  {checkResult}
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </Section>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Panel
 // ---------------------------------------------------------------------------
 
 export function SettingsPanel({
   config,
+  state,
   onClose,
   onSaved,
 }: {
   config: ConfigDto;
+  /** Live /api/state — per-account usage for the accounts section indicators. */
+  state: StateDto;
   onClose: () => void;
   onSaved: (cfg: ConfigDto) => void;
 }) {
@@ -586,6 +940,8 @@ export function SettingsPanel({
                 </div>
               </div>
             </Section>
+
+            <AccountsSection config={config} usage={state.usage} onSaved={onSaved} />
 
             <Section title="Judge">
               <div className="grid grid-cols-2 gap-4">

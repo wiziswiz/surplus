@@ -14,6 +14,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { createWriteStream, existsSync, mkdirSync, rmSync } from 'node:fs';
 import * as path from 'node:path';
 import type { RunOutcome, RunnerResult, RunTaskArgs, TaskRow } from './types.js';
+import { sanitizeAccountKey } from './config.js';
 import { buildGoalCondition, redactSecrets } from './vision.js';
 
 const QUOTA_RE = /rate.?limit|quota|overloaded|401|authentication|expired/i;
@@ -301,9 +302,13 @@ export async function runTask(args: RunTaskArgs): Promise<RunnerResult> {
 
   mkdirSync(logsDir, { recursive: true });
   // claimNextReadyTask increments attempts atomically at claim time, so the
-  // row we receive already reflects THIS attempt's number.
+  // row we receive already reflects THIS attempt's number. The account-key
+  // suffix keeps two accounts retrying the same task (e.g. after a refunded
+  // quota clip reuses an attempt number) from clobbering each other's logs.
   const attempt = Math.max(1, task.attempts ?? 1);
-  const logPath = path.join(logsDir, `${task.id}-attempt${attempt}.log`);
+  const accountKey = args.accountKey ?? null;
+  const accountSuffix = accountKey === null ? '' : `-${sanitizeAccountKey(accountKey)}`;
+  const logPath = path.join(logsDir, `${task.id}-attempt${attempt}${accountSuffix}.log`);
 
   // argv-injection guard: model/effort are untrusted (task row / VISION
   // frontmatter / board PATCH) and become `--model <v> --effort <v>` argv
@@ -382,9 +387,11 @@ export async function runTask(args: RunTaskArgs): Promise<RunnerResult> {
       onHeartbeat: args.onHeartbeat,
       header:
         `[surplus] task=${task.id} attempt=${attempt} provider=claude ` +
+        `account=${accountKey ?? 'claude'} ` +
         `model=${model} effort=${effort} branch=${branch} started=${new Date(startedAt).toISOString()}\n`,
       startedAt,
       signal: args.signal,
+      configDir: args.configDir ?? null,
     });
   } finally {
     finalizeWorktree({ worktreePath, projectPath: project.path, taskId: task.id });
@@ -402,8 +409,11 @@ function runClaudeGoal(opts: {
   startedAt: number;
   /** Dispatcher usage-watchdog abort: SIGTERM the worker, outcome 'quota'. */
   signal?: AbortSignal;
+  /** Non-null = export CLAUDE_CONFIG_DIR for the worker (multi-account). */
+  configDir?: string | null;
 }): Promise<RunnerResult> {
-  const { argv, cwd, branch, logPath, timeoutMs, onHeartbeat, header, startedAt, signal } = opts;
+  const { argv, cwd, branch, logPath, timeoutMs, onHeartbeat, header, startedAt, signal, configDir } =
+    opts;
 
   return new Promise<RunnerResult>((resolve) => {
     const log = createWriteStream(logPath, { flags: 'a', mode: 0o600 });
@@ -415,7 +425,13 @@ function runClaudeGoal(opts: {
     const redactedLog = makeRedactingWriter((text) => log.write(text));
     log.write(header);
 
-    const child = spawn('claude', argv, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+    // Non-null configDir = run as that claude account: spread process.env and
+    // override only CLAUDE_CONFIG_DIR (the value never contains secrets).
+    const child = spawn('claude', argv, {
+      cwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      ...(configDir != null ? { env: { ...process.env, CLAUDE_CONFIG_DIR: configDir } } : {}),
+    });
 
     // Keep the Mac awake while the worker runs (best-effort, macOS only).
     try {

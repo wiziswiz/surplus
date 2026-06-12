@@ -5,13 +5,13 @@
  * signatures (exported from the named file) so modules integrate without edits.
  *
  * Module map:
- *   usage.ts            → getUsage() (claude OAuth endpoint), readCredentials() via credentials.ts
- *   providers/claude.ts → ProviderAdapter for claude (wraps usage.ts + runner.ts)
- *   providers/codex.ts  → ProviderAdapter for codex (codex CLI usage probe + `codex exec` runner)
- *   config.ts           → loadConfig(), defaultConfig(), path helpers, isPaused()
- *   decide.ts           → decide() — pure, called once per enabled provider
+ *   usage.ts            → getUsage() (claude OAuth endpoint, per-account cache), readCredentials() via credentials.ts
+ *   providers/claude.ts → claudeAccountAdapters() — one AccountAdapter per configured claude account
+ *   providers/codex.ts  → codexAccountAdapter() — AccountAdapter for codex (CLI usage probe + `codex exec` runner)
+ *   config.ts           → loadConfig(), defaultConfig(), resolveAccounts(), path helpers, isPaused()
+ *   decide.ts           → decide() — pure, called once per enabled ACCOUNT
  *   db.ts               → openDb(), all row CRUD + event append
- *   dispatcher.ts       → dispatchTick() — provider-aware claim + run + judge orchestration
+ *   dispatcher.ts       → dispatchTick() — account-aware claim + run + judge orchestration
  *   runner.ts           → runTask() claude implementation (worktree + /goal session)
  *   judge.ts            → judgeRun() — always claude, judges either provider's work
  *   vision.ts           → parseVision(), buildGoalCondition(), draftVision(), scaffoldProject()
@@ -35,8 +35,24 @@
  */
 export type Provider = 'claude' | 'codex';
 
-/** Task affinity: a specific provider, or 'any' = whichever provider is burning. */
-export type ProviderPref = Provider | 'any';
+/**
+ * Account key — the db/event/affinity-level identifier for one burnable
+ * subscription account:
+ *   - 'claude'       → the main/default claude account. BACK-COMPAT: existing
+ *                      db rows and task/project affinities written before the
+ *                      multi-account feature keep their exact meaning.
+ *   - 'claude:<id>'  → a non-main claude account (id slug [a-z0-9-]{1,24}).
+ *   - 'codex'        → the single codex account.
+ */
+export type AccountKey = string;
+
+/**
+ * Task/project affinity: a provider name (any account of that provider), a
+ * specific claude account key ('claude:<id>'), or 'any' = whichever account is
+ * burning. Stored in TEXT columns — the grammar is
+ * 'claude' | 'codex' | 'any' | 'claude:<id>'.
+ */
+export type ProviderPref = Provider | 'any' | `claude:${string}`;
 
 // ---------------------------------------------------------------------------
 // Usage (per-provider rate-limit windows)
@@ -73,6 +89,23 @@ export interface OAuthCredentials {
 export type ModelChoice = 'opus' | 'sonnet' | 'haiku' | (string & {});
 export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
+/**
+ * One claude subscription account, addressed via a Claude Code profile dir
+ * (CLAUDE_CONFIG_DIR). surplus NEVER stores tokens — credentials are read at
+ * call time from <configDir>/.credentials.json or the macOS Keychain (custom
+ * dirs use the hashed service name 'Claude Code-credentials-<sha256[:8]>').
+ */
+export interface ClaudeAccountConfig {
+  /** Slug [a-z0-9-]{1,24}. 'main' is reserved for the default account (key 'claude'). */
+  id: string;
+  /** Display label, e.g. 'personal' | 'work'. */
+  label: string;
+  /** Claude Code profile dir; '~' expands. null = the default ~/.claude. */
+  configDir: string | null;
+  /** Manual burn order: lower = preferred. null = auto (soonest 7-day reset first). */
+  priority: number | null;
+}
+
 export interface ProviderConfig {
   enabled: boolean;
   defaults: {
@@ -88,6 +121,13 @@ export interface ProviderConfig {
    * utilization treated as 0/unknown. null = provider usage unavailable.
    */
   weeklyResetFallback?: string | null;
+  /**
+   * claude only: burnable subscription accounts (max 6). Absent/empty = the
+   * single default account [{id:'main', label:'personal', configDir:null,
+   * priority:null}]. Enumerate via config.ts resolveAccounts() — never read
+   * this raw.
+   */
+  accounts?: ClaudeAccountConfig[];
 }
 
 export interface SurplusConfig {
@@ -327,10 +367,10 @@ export interface Vision {
 // Board REST/SSE API (server.ts ⇄ board/) — all JSON
 // ---------------------------------------------------------------------------
 //
-//   GET  /api/state                  → ApiState
+//   GET  /api/state                  → ApiState (usage/decisions keyed by AccountKey; includes accounts[])
 //   GET  /api/projects               → ProjectRow[]
 //   POST /api/projects               → body {path} (existing) | {name} (new) → ProjectRow
-//   PATCH /api/projects/:id          → body subset {name?, provider? (claude|codex|any), model?, effort?}
+//   PATCH /api/projects/:id          → body subset {name?, provider? (claude|codex|any|claude:<id>), model?, effort?}
 //                                      (non-empty strings; model/effort also accept null = inherit) → ProjectRow
 //   DELETE /api/projects/:id         → 400 while any task is non-archived; else deletes the
 //                                      project + its archived tasks/runs → {ok: true}
@@ -339,10 +379,12 @@ export interface Vision {
 //   GET  /api/tasks?status=...       → TaskRow[] (all non-archived when no filter)
 //   POST /api/tasks                  → body Partial<TaskRow> & {projectId,title} → TaskRow
 //   GET  /api/tasks/:id              → {task: TaskRow, runs: TaskRunRow[], events: TaskEventRow[]}
-//   PATCH /api/tasks/:id             → body Partial<Pick<TaskRow,'status'|'priority'|'title'|'body'|'model'|'effort'|'scheduledAt'|'provider'>> → TaskRow ('running' is dispatcher-only)
+//   PATCH /api/tasks/:id             → body Partial<Pick<TaskRow,'status'|'priority'|'title'|'body'|'model'|'effort'|'scheduledAt'|'provider'>> → TaskRow ('running' is dispatcher-only;
+//                                      provider accepts the affinity grammar claude|codex|any|claude:<id>)
 //   PATCH /api/config                → body deep-partial SurplusConfig (validated by server.ts buildConfigPatch:
 //                                      booleans, integer percents 0–100, positive-integer minutes/hours,
-//                                      port 1024–65535, non-empty model/effort, provider keys claude|codex)
+//                                      port 1024–65535, non-empty model/effort, provider keys claude|codex,
+//                                      providers.claude.accounts: ClaudeAccountConfig[] max 6)
 //                                      → effective SurplusConfig (persisted via the cli-injected updateConfig dep)
 //   POST /api/pause | /api/resume    → {paused: boolean}
 //   POST /api/scheduler              → body {armed: boolean} → installs/removes the launchd tick agent → {armed: boolean}
@@ -350,7 +392,9 @@ export interface Vision {
 //                                      available:false when the server runs without the cli-injected dep)
 //   POST /api/board-service          → installs the KeepAlive board service + Dock app → {installed: boolean}
 //                                      (503 without the dep; uninstall is deliberately CLI-only)
-//   POST /api/burn                   → body {taskId?: string, provider?: Provider} → manual one-shot dispatch (ignores windows, respects pacing)
+//   POST /api/burn                   → body {taskId?: string, provider?: Provider | AccountKey} → manual one-shot
+//                                      dispatch (ignores windows, respects pacing; a provider name targets any
+//                                      account of that provider in AUTO burn order, an AccountKey pins one account)
 //   GET  /api/events?after=<id>      → SSE stream of TaskEventRow (named event: 'ev') + periodic 'state' frames (ApiState)
 //   GET  /api/events/poll?after=<id> → TaskEventRow[] (plain JSON for non-SSE clients, e.g. the menu-bar app)
 //
@@ -370,10 +414,12 @@ export interface DiscoveredRepo {
 }
 
 export interface ApiState {
-  /** Per-provider snapshots; key absent when the provider is disabled. */
-  usage: Partial<Record<Provider, UsageSnapshot | null>>;
-  /** Per-provider decisions; key absent when the provider is disabled. */
-  decisions: Partial<Record<Provider, Decision>>;
+  /** Per-ACCOUNT snapshots keyed by AccountKey; key absent when the account's provider is disabled. */
+  usage: Record<string /* AccountKey */, UsageSnapshot | null>;
+  /** Per-ACCOUNT decisions keyed by AccountKey; key absent when the account's provider is disabled. */
+  decisions: Record<string /* AccountKey */, Decision>;
+  /** Burnable accounts in config order (claude accounts first, then codex). */
+  accounts: Array<{ key: string; provider: Provider; label: string; priority: number | null }>;
   paused: boolean;
   /** True when the launchd tick scheduler is installed (the master switch). */
   armed: boolean;
@@ -383,7 +429,7 @@ export interface ApiState {
 }
 
 // ---------------------------------------------------------------------------
-// Provider adapter (providers/claude.ts, providers/codex.ts)
+// Account adapter (providers/claude.ts, providers/codex.ts)
 // ---------------------------------------------------------------------------
 
 export interface RunTaskArgs {
@@ -398,6 +444,20 @@ export interface RunTaskArgs {
   logsDir: string;
   worktreesDir: string;
   /**
+   * Claude Code profile dir for the spawned worker: exported as
+   * CLAUDE_CONFIG_DIR over process.env when non-null. null/absent = the
+   * default account's environment. (The judge always runs main — it never
+   * receives this override.)
+   */
+  configDir?: string | null;
+  /**
+   * AccountKey of the claiming account ('claude' | 'claude:<id>' | 'codex'),
+   * used in the log header and as a log-filename suffix so two accounts
+   * retrying the same task never collide on
+   * <task.id>-attempt<N>-<accountKeySanitized>.log.
+   */
+  accountKey?: string;
+  /**
    * Aborted by the dispatcher's usage watchdog when a reserve ceiling is
    * crossed mid-run. Runners SIGTERM the worker and return outcome 'quota'
    * (which also trips the dispatch respawn guard).
@@ -405,17 +465,29 @@ export interface RunTaskArgs {
   signal?: AbortSignal;
 }
 
-export interface ProviderAdapter {
+/** One burnable subscription account, bound to its usage source + runner. */
+export interface AccountAdapter {
+  /** AccountKey: 'claude' (main) | 'claude:<id>' | 'codex'. */
+  key: string;
   provider: Provider;
+  label: string;
+  /** Manual burn order (lower = preferred); null = auto. */
+  priority: number | null;
+  /** Resolved CLAUDE_CONFIG_DIR ('~' expanded); null = default. Always null for codex. */
+  configDir: string | null;
   /**
-   * Live usage snapshot; null when this provider has no credentials/CLI.
-   * `fresh: true` (manual refresh) narrows the success-cache window to a
-   * 30s floor — it never overrides an active 429 backoff.
+   * Live usage snapshot FOR THIS ACCOUNT (cached per account); null when the
+   * account has no credentials/CLI. `fresh: true` (manual refresh) narrows
+   * the success-cache window to a 30s floor — it never overrides an active
+   * 429 backoff.
    */
   getUsage(opts?: { fresh?: boolean }): Promise<UsageSnapshot | null>;
   /** Execute one work session in a worktree; outcome 'failed' = completed-pending-judge. */
   runTask(args: RunTaskArgs): Promise<RunnerResult>;
 }
+
+/** @deprecated Pre-multi-account adapter shape — use AccountAdapter. */
+export type ProviderAdapter = Pick<AccountAdapter, 'provider' | 'getUsage' | 'runTask'>;
 
 // ---------------------------------------------------------------------------
 // Paths (single source of truth — config.ts exports helpers built on these)
@@ -427,4 +499,9 @@ export const CONFIG_FILE = 'config.json';        // ~/.surplus/config.json
 export const PAUSED_FILE = 'PAUSED';             // ~/.surplus/PAUSED (kill switch)
 export const LOGS_DIR = 'logs';                  // ~/.surplus/logs/
 export const WORKTREES_DIR = 'worktrees';        // ~/.surplus/worktrees/<task-id>
+/**
+ * Main-claude-account usage cache. Non-main accounts get an isolated cache at
+ * .usage-cache-<sanitized-account-key>.json (see usage.ts usageCacheFile) so
+ * accounts never serve each other's numbers.
+ */
 export const USAGE_CACHE_FILE = '.usage-cache.json';

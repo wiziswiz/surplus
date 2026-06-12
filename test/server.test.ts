@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import * as path from 'node:path';
 import {
   applyConfigPatch,
@@ -12,9 +12,9 @@ import {
   type ServerDb,
 } from '../src/server.js';
 import type {
+  AccountAdapter,
   ProjectRow,
   Provider,
-  ProviderAdapter,
   SurplusConfig,
   TaskEventRow,
   TaskEventType,
@@ -111,7 +111,7 @@ function makeConfig(): SurplusConfig {
   };
 }
 
-function makeAdapter(provider: Provider): ProviderAdapter {
+function makeAccount(provider: Provider, key: string = provider): AccountAdapter {
   const snap: UsageSnapshot = {
     provider,
     planName: 'Max',
@@ -123,7 +123,11 @@ function makeAdapter(provider: Provider): ProviderAdapter {
     fetchedAt: Date.now(),
   };
   return {
+    key,
     provider,
+    label: key,
+    priority: null,
+    configDir: null,
     getUsage: async () => snap,
     runTask: async () => {
       throw new Error('runTask is not used by the server');
@@ -209,6 +213,91 @@ describe('buildConfigPatch', () => {
   });
 });
 
+describe('buildConfigPatch — providers.claude.accounts', () => {
+  const acct = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    id: 'work',
+    label: 'Work Max',
+    configDir: '~/.surplus/profiles/work',
+    priority: 1,
+    ...over,
+  });
+  const patch = (accounts: unknown) => buildConfigPatch({ providers: { claude: { accounts } } });
+
+  it('accepts a valid account list (main keeps configDir null; ~ and absolute dirs ok)', () => {
+    const r = patch([
+      { id: 'main', label: 'personal', configDir: null, priority: null },
+      acct(),
+      acct({ id: 'ci', label: 'ci', configDir: '/opt/claude-profiles/ci', priority: null }),
+    ]);
+    expect(r.ok).toBe(true);
+  });
+
+  it('accepts missing configDir/priority on main (read as null) and an empty list', () => {
+    expect(patch([{ id: 'main', label: 'personal' }]).ok).toBe(true);
+    expect(patch([]).ok).toBe(true);
+  });
+
+  it('rejects non-arrays and more than 6 accounts', () => {
+    expect(patch('main').ok).toBe(false);
+    expect(patch({ id: 'main' }).ok).toBe(false);
+    const seven = Array.from({ length: 7 }, (_, i) =>
+      acct({ id: `a${i}`, configDir: `~/p/a${i}` }),
+    );
+    expect(patch(seven).ok).toBe(false);
+  });
+
+  it('rejects bad id slugs and duplicates', () => {
+    expect(patch([acct({ id: 'Work' })]).ok).toBe(false);
+    expect(patch([acct({ id: '' })]).ok).toBe(false);
+    expect(patch([acct({ id: 'a'.repeat(25) })]).ok).toBe(false);
+    expect(patch([acct({ id: 'a_b' })]).ok).toBe(false);
+    expect(patch([acct(), acct({ label: 'other' })]).ok).toBe(false); // duplicate 'work'
+  });
+
+  it("rejects main with a configDir and non-main without an absolute/~ configDir", () => {
+    expect(patch([{ id: 'main', label: 'p', configDir: '~/elsewhere', priority: null }]).ok).toBe(
+      false,
+    );
+    expect(patch([acct({ configDir: null })]).ok).toBe(false);
+    expect(patch([acct({ configDir: undefined })]).ok).toBe(false);
+    expect(patch([acct({ configDir: 'profiles/work' })]).ok).toBe(false);
+  });
+
+  it("rejects a non-main configDir resolving to the default ~/.claude (that's the main account)", () => {
+    expect(patch([acct({ configDir: '~/.claude' })]).ok).toBe(false);
+    expect(patch([acct({ configDir: '~/.claude/' })]).ok).toBe(false);
+    expect(patch([acct({ configDir: path.join(homedir(), '.claude') })]).ok).toBe(false);
+  });
+
+  it('rejects two accounts resolving to the same profile dir (one login enumerated twice)', () => {
+    expect(
+      patch([acct(), acct({ id: 'work2', configDir: path.join(homedir(), '.surplus/profiles/work') })])
+        .ok,
+    ).toBe(false);
+    expect(
+      patch([acct(), acct({ id: 'work2', configDir: '~/.surplus/profiles/work2' })]).ok,
+    ).toBe(true);
+  });
+
+  it('rejects bad labels and priorities', () => {
+    expect(patch([acct({ label: '' })]).ok).toBe(false);
+    expect(patch([acct({ label: '   ' })]).ok).toBe(false);
+    expect(patch([acct({ label: 'x'.repeat(41) })]).ok).toBe(false);
+    expect(patch([acct({ label: 42 })]).ok).toBe(false);
+    expect(patch([acct({ priority: 100 })]).ok).toBe(false);
+    expect(patch([acct({ priority: -1 })]).ok).toBe(false);
+    expect(patch([acct({ priority: 1.5 })]).ok).toBe(false);
+    expect(patch([acct({ priority: 'high' })]).ok).toBe(false);
+  });
+
+  it('rejects unknown account keys and accounts on codex', () => {
+    expect(patch([acct({ hax: true })]).ok).toBe(false);
+    expect(
+      buildConfigPatch({ providers: { codex: { accounts: [acct()] } } }).ok,
+    ).toBe(false);
+  });
+});
+
 describe('applyConfigPatch', () => {
   it('merges nested values without dropping siblings', () => {
     const next = applyConfigPatch(makeConfig(), { reserve: { weeklyPct: 30 } });
@@ -226,7 +315,7 @@ const BASE = `http://127.0.0.1:${PORT}`;
 const ac = new AbortController();
 const db = makeDb();
 let pausedFlag = false;
-const burnCalls: Array<[string | undefined, Provider | undefined]> = [];
+const burnCalls: Array<[string | undefined, string | undefined]> = [];
 const serverConfig = makeConfig();
 const configPatches: unknown[] = [];
 let tmpRepo: string;
@@ -261,7 +350,7 @@ beforeAll(async () => {
     port: PORT,
     db,
     config: serverConfig,
-    adapters: { claude: makeAdapter('claude') },
+    accounts: [makeAccount('claude')],
     decideFn: (input) => ({ action: 'idle', reason: `test:${input.usage.provider}` }),
     paused: () => pausedFlag,
     setPaused: (b) => {
@@ -338,6 +427,26 @@ describe('tasks', () => {
       body: JSON.stringify({ projectId: 'demo', title: 'x', status: 'running' }),
     });
     expect(res.status).toBe(400);
+  });
+
+  it("rejects a 'claude:<id>' affinity that names no configured account (silent starvation)", async () => {
+    const post = await fetch(`${BASE}/api/tasks`, {
+      method: 'POST',
+      body: JSON.stringify({ projectId: 'demo', title: 'pinned', provider: 'claude:ghost' }),
+    });
+    expect(post.status).toBe(400);
+
+    const taskPatch = await fetch(`${BASE}/api/tasks/${taskId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ provider: 'claude:ghost' }),
+    });
+    expect(taskPatch.status).toBe(400);
+
+    const projPatch = await fetch(`${BASE}/api/projects/demo`, {
+      method: 'PATCH',
+      body: JSON.stringify({ provider: 'claude:ghost' }),
+    });
+    expect(projPatch.status).toBe(400);
   });
 
   it('GET /api/tasks filters by status and validates the filter', async () => {
@@ -576,7 +685,7 @@ describe('board service (with dep)', () => {
       port: PORT2,
       db: makeDb(),
       config: makeConfig(),
-      adapters: {},
+      accounts: [],
       decideFn: () => ({ action: 'idle', reason: 'test' }),
       paused: () => false,
       setPaused: () => undefined,
@@ -681,6 +790,173 @@ describe('PATCH /api/config', () => {
     expect(configPatches.at(-1)).toEqual(patch);
     const state = (await (await fetch(`${BASE}/api/state`)).json()) as { config: SurplusConfig };
     expect(state.config.reserve.weeklyPct).toBe(20);
+  });
+});
+
+describe('multi-account /api/state + /api/burn', () => {
+  const PORT3 = PORT + 421;
+  const BASE3 = `http://127.0.0.1:${PORT3}`;
+  const ac3 = new AbortController();
+  const burn3: Array<[string | undefined, string | undefined]> = [];
+
+  beforeAll(async () => {
+    const cfg = makeConfig();
+    cfg.providers.codex.enabled = true;
+    cfg.providers.claude.accounts = [
+      { id: 'main', label: 'personal', configDir: null, priority: null },
+      { id: 'work', label: 'work', configDir: '~/.surplus/profiles/work', priority: 1 },
+    ];
+    await startServer({
+      port: PORT3,
+      db: makeDb(),
+      config: cfg,
+      accounts: [
+        makeAccount('claude'),
+        { ...makeAccount('claude', 'claude:work'), label: 'work', priority: 1 },
+        makeAccount('codex'),
+      ],
+      decideFn: (input) => ({ action: 'idle', reason: `test:${input.usage.provider}` }),
+      paused: () => false,
+      setPaused: () => undefined,
+      deps: {
+        triggerBurn: async (taskId, provider) => {
+          burn3.push([taskId, provider]);
+          return { launched: 0 };
+        },
+      },
+      signal: ac3.signal,
+    });
+  });
+
+  afterAll(() => ac3.abort());
+
+  it('keys usage + decisions by ACCOUNT key and lists accounts metadata', async () => {
+    const res = await fetch(`${BASE3}/api/state`);
+    expect(res.status).toBe(200);
+    const state = (await res.json()) as {
+      usage: Record<string, { provider: string; planName: string } | null>;
+      decisions: Record<string, { reason: string }>;
+      accounts: Array<{ key: string; provider: string; label: string; priority: number | null }>;
+    };
+    expect(Object.keys(state.usage).sort()).toEqual(['claude', 'claude:work', 'codex']);
+    expect(state.usage['claude:work']?.planName).toBe('Max');
+    expect(state.usage['claude:work']?.provider).toBe('claude');
+    expect(state.decisions['claude:work']?.reason).toBe('test:claude');
+    expect(state.decisions.codex?.reason).toBe('test:codex');
+    expect(state.accounts).toEqual([
+      { key: 'claude', provider: 'claude', label: 'claude', priority: null },
+      { key: 'claude:work', provider: 'claude', label: 'work', priority: 1 },
+      { key: 'codex', provider: 'codex', label: 'codex', priority: null },
+    ]);
+  });
+
+  it('accepts burn provider as an account key or a provider name; rejects unknown keys', async () => {
+    const byKey = await fetch(`${BASE3}/api/burn`, {
+      method: 'POST',
+      body: JSON.stringify({ provider: 'claude:work' }),
+    });
+    expect(byKey.status).toBe(200);
+    expect(burn3.at(-1)).toEqual([undefined, 'claude:work']);
+
+    const byProvider = await fetch(`${BASE3}/api/burn`, {
+      method: 'POST',
+      body: JSON.stringify({ provider: 'claude' }),
+    });
+    expect(byProvider.status).toBe(200);
+    expect(burn3.at(-1)).toEqual([undefined, 'claude']);
+
+    for (const provider of ['claude:nope', 'codex:x', 'gpt', 'CLAUDE:WORK']) {
+      const bad = await fetch(`${BASE3}/api/burn`, {
+        method: 'POST',
+        body: JSON.stringify({ provider }),
+      });
+      expect(bad.status).toBe(400);
+    }
+  });
+});
+
+describe('accounts PATCHed since boot', () => {
+  it('persists providers.claude.accounts and lets /api/burn target the new key', async () => {
+    // The main test server booted with a single live 'claude' adapter and no
+    // accounts in config — PATCH the config (validated whole-array replace),
+    // then burn against the new key: validation falls through the live
+    // adapters to resolveAccounts(config).
+    const res = await fetch(`${BASE}/api/config`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        providers: {
+          claude: {
+            accounts: [
+              { id: 'main', label: 'personal', configDir: null, priority: null },
+              { id: 'beta', label: 'beta', configDir: '~/.surplus/profiles/beta', priority: null },
+            ],
+          },
+        },
+      }),
+    });
+    expect(res.status).toBe(200);
+    const cfg = (await res.json()) as SurplusConfig;
+    expect(cfg.providers.claude.accounts).toHaveLength(2);
+    expect(cfg.providers.claude.defaults.model).toBe('opus'); // siblings survive
+
+    const burn = await fetch(`${BASE}/api/burn`, {
+      method: 'POST',
+      body: JSON.stringify({ provider: 'claude:beta' }),
+    });
+    expect(burn.status).toBe(200);
+    expect(burnCalls.at(-1)).toEqual([undefined, 'claude:beta']);
+
+    const unknown = await fetch(`${BASE}/api/burn`, {
+      method: 'POST',
+      body: JSON.stringify({ provider: 'claude:gone' }),
+    });
+    expect(unknown.status).toBe(400);
+  });
+
+  it('account removal rewrites pinned task/project affinities to claude and records events', async () => {
+    // 'beta' is configured by the previous test — pin a task and a project to it.
+    const created = await fetch(`${BASE}/api/tasks`, {
+      method: 'POST',
+      body: JSON.stringify({
+        projectId: 'demo',
+        title: 'pinned to beta',
+        provider: 'claude:beta',
+        status: 'ready',
+      }),
+    });
+    expect(created.status).toBe(201);
+    const pinned = (await created.json()) as TaskRow;
+    expect(pinned.provider).toBe('claude:beta');
+    const projRes = await fetch(`${BASE}/api/projects/demo`, {
+      method: 'PATCH',
+      body: JSON.stringify({ provider: 'claude:beta' }),
+    });
+    expect(projRes.status).toBe(200);
+
+    // Remove 'beta'. The pinned rows would never match the claim predicate
+    // again — they must be rewritten, not left to starve silently in 'ready'.
+    const res = await fetch(`${BASE}/api/config`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        providers: {
+          claude: {
+            accounts: [{ id: 'main', label: 'personal', configDir: null, priority: null }],
+          },
+        },
+      }),
+    });
+    expect(res.status).toBe(200);
+
+    const detail = (await (await fetch(`${BASE}/api/tasks/${pinned.id}`)).json()) as {
+      task: TaskRow;
+    };
+    expect(detail.task.provider).toBe('claude');
+    const projects = (await (await fetch(`${BASE}/api/projects`)).json()) as ProjectRow[];
+    expect(projects.find((p) => p.id === 'demo')?.provider).toBe('claude');
+    const rewrites = db.events.filter(
+      (e) => e.type === 'task-updated' && e.data.includes('affinity reset to claude'),
+    );
+    expect(rewrites.length).toBeGreaterThanOrEqual(2);
   });
 });
 

@@ -94,8 +94,11 @@ function readVisionTemplate(): string {
 // parseVision
 // ---------------------------------------------------------------------------
 
+/** Affinity grammar: claude | codex | any | claude:<account-id>. */
 function normalizeProviderPref(v: unknown): ProviderPref | null {
-  return v === 'claude' || v === 'codex' || v === 'any' ? v : null;
+  if (v === 'claude' || v === 'codex' || v === 'any') return v;
+  if (typeof v === 'string' && /^claude:[a-z0-9-]{1,24}$/.test(v)) return v as ProviderPref;
+  return null;
 }
 
 function normalizeString(v: unknown): string | null {

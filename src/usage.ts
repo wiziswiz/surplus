@@ -8,7 +8,9 @@
  *  - Returns null for API-key users (subscriptionType 'api'/empty), missing or
  *    expired credentials, and custom ANTHROPIC_BASE_URL endpoints.
  *  - Returns { unavailable: true, error } on API failure.
- *  - File cache at ~/.surplus/.usage-cache.json: 5 min TTL on success, 15 s on
+ *  - File cache at ~/.surplus/.usage-cache.json (PER ACCOUNT: non-main claude
+ *    accounts use .usage-cache-<key>.json — see usageCacheFile): 5 min TTL on
+ *    success, 15 s on
  *    failure. On 429, serves lastGoodData (error 'rate-limited',
  *    unavailable=false) while honoring Retry-After (clamped to the 5-min cap)
  *    / exponential backoff (60s/120s/240s, capped 5 min) before refetching —
@@ -25,6 +27,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { SURPLUS_DIR_NAME, USAGE_CACHE_FILE } from './types.js';
 import type { OAuthCredentials, UsageSnapshot } from './types.js';
+import { sanitizeAccountKey } from './config.js';
 import { readCredentials } from './credentials.js';
 
 const USAGE_ENDPOINT = 'https://api.anthropic.com/api/oauth/usage';
@@ -44,15 +47,26 @@ const RATE_LIMITED_MAX_MS = 5 * 60_000; // 429 backoff cap
  */
 const LAST_GOOD_MAX_AGE_MS = 15 * 60_000;
 
-/** Test seams. Production callers pass nothing. */
+/** Test seams + per-account selectors. Production callers pass nothing or {configDir, accountKey}. */
 export interface GetUsageOverrides {
   fetchImpl?: typeof fetch;
   now?: () => number;
-  /** Directory holding .usage-cache.json; default ~/.surplus. */
+  /** Directory holding the usage cache file(s); default ~/.surplus. */
   cacheDir?: string;
-  /** Credential source; default readCredentials() (keychain + file). */
-  readCredentialsImpl?: (now: number) => OAuthCredentials | null;
+  /** Credential source; default readCredentials() (keychain + file, configDir-aware). */
+  readCredentialsImpl?: (now: number, configDir?: string | null) => OAuthCredentials | null;
   env?: NodeJS.ProcessEnv;
+  /**
+   * Claude Code profile dir of the account whose usage to fetch; forwarded to
+   * the credential reader. null/undefined = the default account flow.
+   */
+  configDir?: string | null;
+  /**
+   * AccountKey for CACHE ISOLATION: each account caches into its own file
+   * (see usageCacheFile) so accounts never serve each other's numbers.
+   * Absent (or 'claude', the main account) = the legacy .usage-cache.json.
+   */
+  accountKey?: string;
   /**
    * Accept cached success data only up to this age (ms) — a manual-refresh
    * hook. Floored at MIN_MAX_AGE_MS (30s) so a refresh button can't hammer
@@ -62,6 +76,16 @@ export interface GetUsageOverrides {
 }
 
 export const MIN_MAX_AGE_MS = 30_000;
+
+/**
+ * Per-account cache filename: the main account ('claude' / absent) keeps the
+ * legacy USAGE_CACHE_FILE (existing caches stay valid); every other account
+ * key gets `.usage-cache-<sanitized [a-z0-9-] key>.json`.
+ */
+export function usageCacheFile(accountKey?: string): string {
+  if (accountKey === undefined || accountKey === 'claude') return USAGE_CACHE_FILE;
+  return `.usage-cache-${sanitizeAccountKey(accountKey)}.json`;
+}
 
 // ---------------------------------------------------------------------------
 // Pure helpers (exported for tests)
@@ -130,6 +154,15 @@ type StoredSnapshot = Omit<UsageSnapshot, 'fiveHourResetsAt' | 'sevenDayResetsAt
 interface CacheFile {
   data: StoredSnapshot;
   timestamp: number;
+  /**
+   * Credential-source identity: the resolved configDir that produced this
+   * snapshot (null = the default ~/.claude flow). A mismatch with the
+   * caller's configDir is a cache MISS — rebinding an account id to a
+   * different Claude profile dir (or re-adding a removed id pointing at a
+   * new dir) must never serve the previous subscription's numbers to
+   * decide() or the reserve watchdog. Absent (legacy files) reads as null.
+   */
+  configDir?: string | null;
   rateLimitedCount?: number;
   /** ms epoch from a 429 Retry-After header; wins over exponential backoff. */
   retryAfterUntil?: number;
@@ -279,16 +312,24 @@ export async function getUsage(overrides: GetUsageOverrides = {}): Promise<Usage
   const now = overrides.now ? overrides.now() : Date.now();
   const fetchImpl = overrides.fetchImpl ?? fetch;
   const cacheDir = overrides.cacheDir ?? path.join(os.homedir(), SURPLUS_DIR_NAME);
-  const cachePath = path.join(cacheDir, USAGE_CACHE_FILE);
+  const cachePath = path.join(cacheDir, usageCacheFile(overrides.accountKey));
+  const sourceDir = overrides.configDir ?? null;
 
-  const cache = readCacheFile(cachePath);
+  // Cache identity is (accountKey, configDir), not the key alone: a snapshot
+  // produced by a different credential source is discarded outright —
+  // including its lastGoodData and 429 backoff state, which belong to the
+  // other subscription.
+  let cache = readCacheFile(cachePath);
+  if (cache && (cache.configDir ?? null) !== sourceDir) cache = null;
   if (cache) {
     const served = serveFromCache(cache, now, overrides.maxAgeMs);
     if (served) return served;
   }
 
-  const readCreds = overrides.readCredentialsImpl ?? readCredentials;
-  const credentials = readCreds(now);
+  const readCreds =
+    overrides.readCredentialsImpl ??
+    ((nowMs: number, configDir?: string | null) => readCredentials(nowMs, { configDir }));
+  const credentials = readCreds(now, overrides.configDir ?? null);
   if (!credentials) return null;
 
   const planName = getPlanName(credentials.subscriptionType);
@@ -308,7 +349,7 @@ export async function getUsage(overrides: GetUsageOverrides = {}): Promise<Usage
       fetchedAt: now,
     };
     const stored = serialize(snapshot);
-    writeCacheFile(cachePath, { data: stored, timestamp: now, lastGoodData: stored });
+    writeCacheFile(cachePath, { data: stored, timestamp: now, configDir: sourceDir, lastGoodData: stored });
     return snapshot;
   }
 
@@ -332,6 +373,7 @@ export async function getUsage(overrides: GetUsageOverrides = {}): Promise<Usage
     writeCacheFile(cachePath, {
       data: serialize(failure),
       timestamp: now,
+      configDir: sourceDir,
       rateLimitedCount,
       ...(retryAfterUntil !== undefined ? { retryAfterUntil } : {}),
       ...(lastGood ? { lastGoodData: lastGood } : {}),
@@ -346,6 +388,7 @@ export async function getUsage(overrides: GetUsageOverrides = {}): Promise<Usage
   writeCacheFile(cachePath, {
     data: serialize(failure),
     timestamp: now,
+    configDir: sourceDir,
     ...(cache?.lastGoodData ? { lastGoodData: cache.lastGoodData } : {}),
   });
   return failure;

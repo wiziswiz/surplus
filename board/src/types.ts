@@ -2,7 +2,13 @@
 // (Dates become ISO strings; everything else is structural).
 
 export type Provider = 'claude' | 'codex';
-export type ProviderPref = Provider | 'any';
+/**
+ * Account key: 'claude' (main claude account, back-compat) | 'claude:<id>'
+ * (extra claude accounts) | 'codex'.
+ */
+export type AccountKey = string;
+/** Task/project affinity grammar: claude | codex | any | claude:<id>. */
+export type ProviderPref = Provider | 'any' | `claude:${string}`;
 
 export type TaskStatus =
   | 'triage'
@@ -34,10 +40,23 @@ export interface DecisionDto {
   nextCheckAt?: number;
 }
 
+/** One configured claude account (providers.claude.accounts entries). */
+export interface ClaudeAccountDto {
+  /** Slug [a-z0-9-]{1,24}; 'main' is the default account (key 'claude'). */
+  id: string;
+  label: string;
+  /** Claude Code profile dir (CLAUDE_CONFIG_DIR); null = default ~/.claude. */
+  configDir: string | null;
+  /** Manual burn order (lower = preferred); null = auto. */
+  priority: number | null;
+}
+
 export interface ProviderConfigDto {
   enabled: boolean;
   defaults: { model: string; effort: string };
   weeklyResetFallback?: string | null;
+  /** claude only: burnable accounts (max 6). Absent = the single main account. */
+  accounts?: ClaudeAccountDto[];
 }
 
 export interface ConfigDto {
@@ -69,6 +88,8 @@ export interface ConfigPatchDto {
         enabled?: boolean;
         defaults?: { model?: string; effort?: string };
         weeklyResetFallback?: string | null;
+        /** claude only: whole-array replace, max 6. */
+        accounts?: ClaudeAccountDto[];
       }
     >
   >;
@@ -90,9 +111,21 @@ export interface ConfigPatchDto {
   judgePassScore?: number;
 }
 
+/** One burnable account in /api/state's accounts[] (config order). */
+export interface AccountInfoDto {
+  key: AccountKey;
+  provider: Provider;
+  label: string;
+  priority: number | null;
+}
+
 export interface StateDto {
-  usage: Partial<Record<Provider, UsageDto | null>>;
-  decisions: Partial<Record<Provider, DecisionDto>>;
+  /** Keyed by AccountKey; key absent when the account's provider is disabled. */
+  usage: Record<AccountKey, UsageDto | null>;
+  /** Keyed by AccountKey, same grammar as `usage`. */
+  decisions: Record<AccountKey, DecisionDto>;
+  /** Burnable accounts in config order (claude accounts first, then codex). */
+  accounts: AccountInfoDto[];
   paused: boolean;
   /** True when the launchd tick scheduler is installed (the master switch). */
   armed: boolean;

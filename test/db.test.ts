@@ -3,13 +3,18 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb, type SurplusDb } from '../src/db.js';
-import { dispatchTick, type DispatchDeps, type JudgeRunArgs } from '../src/dispatcher.js';
+import {
+  dispatchTick,
+  orderBurning,
+  type DispatchDeps,
+  type JudgeRunArgs,
+} from '../src/dispatcher.js';
 import type {
+  AccountAdapter,
   DecideInput,
   Decision,
   JudgeVerdict,
   Provider,
-  ProviderAdapter,
   RunTaskArgs,
   RunnerResult,
   SurplusConfig,
@@ -301,6 +306,64 @@ describe('claimTaskById (forced one-shot claim)', () => {
   });
 });
 
+describe('claim matching with account keys (claude:<id> affinities)', () => {
+  it("claimNextReadyTask: 'claude:<id>' tasks match only that account key", () => {
+    const p = makeProject('pa');
+    const t = db.createTask({
+      projectId: p.id,
+      title: 'work-only',
+      status: 'ready',
+      provider: 'claude:work',
+    });
+    // The main account (key 'claude' — accountKey defaults to the provider)
+    // must NOT claim it…
+    expect(db.claimNextReadyTask(Date.now(), 'claude')).toBeNull();
+    expect(db.claimNextReadyTask(Date.now(), 'claude', undefined, 'claude')).toBeNull();
+    // …nor a different claude account…
+    expect(db.claimNextReadyTask(Date.now(), 'claude', undefined, 'claude:personal')).toBeNull();
+    // …but the matching account does.
+    const claimed = db.claimNextReadyTask(Date.now(), 'claude', undefined, 'claude:work');
+    expect(claimed?.id).toBe(t.id);
+    expect(claimed?.status).toBe('running');
+  });
+
+  it("claimNextReadyTask: provider-affinity 'claude' tasks are claimable by ANY claude account", () => {
+    const p = makeProject('pa');
+    const t = db.createTask({
+      projectId: p.id,
+      title: 'claude-affinity',
+      status: 'ready',
+      provider: 'claude',
+    });
+    expect(db.claimNextReadyTask(Date.now(), 'claude', undefined, 'claude:work')?.id).toBe(t.id);
+  });
+
+  it("claimNextReadyTask: 'any' tasks are claimable by a non-main account, and the claim event carries it", () => {
+    const p = makeProject('pa');
+    const t = db.createTask({ projectId: p.id, title: 'any', status: 'ready' , provider: 'any' });
+    expect(db.claimNextReadyTask(Date.now(), 'claude', undefined, 'claude:work')?.id).toBe(t.id);
+    const ev = db.listEventsAfter(0).filter((e) => e.type === 'status-changed').at(-1)!;
+    expect(JSON.parse(ev.data)).toMatchObject({
+      provider: 'claude',
+      account: 'claude:work',
+      via: 'claim',
+    });
+  });
+
+  it('claimTaskById honors account keys the same way', () => {
+    const p = makeProject('pa');
+    const t = db.createTask({
+      projectId: p.id,
+      title: 'work-only',
+      status: 'ready',
+      provider: 'claude:work',
+    });
+    expect(db.claimTaskById(t.id, Date.now(), 'claude')).toBeNull();
+    expect(db.claimTaskById(t.id, Date.now(), 'claude', 'claude:personal')).toBeNull();
+    expect(db.claimTaskById(t.id, Date.now(), 'claude', 'claude:work')?.status).toBe('running');
+  });
+});
+
 // ---------------------------------------------------------------------------
 // events + countRunning
 // ---------------------------------------------------------------------------
@@ -332,7 +395,7 @@ describe('events', () => {
 });
 
 // ---------------------------------------------------------------------------
-// dispatcher flow (fake adapters)
+// dispatcher flow (fake accounts)
 // ---------------------------------------------------------------------------
 
 function makeConfig(overrides?: Partial<SurplusConfig>): SurplusConfig {
@@ -401,18 +464,24 @@ function makeRunnerResult(p?: Partial<RunnerResult>): RunnerResult {
   };
 }
 
-function fakeAdapter(
+function fakeAccount(
   provider: Provider,
   run: (args: RunTaskArgs) => RunnerResult,
-): ProviderAdapter {
+  over: Partial<AccountAdapter> = {},
+): AccountAdapter {
   return {
+    key: provider, // main claude account / codex keep the provider name as key
     provider,
+    label: provider,
+    priority: null,
+    configDir: null,
     async getUsage() {
       return healthyUsage(provider);
     },
     async runTask(args: RunTaskArgs) {
       return run(args);
     },
+    ...over,
   };
 }
 
@@ -425,7 +494,7 @@ function makeDeps(partial: Partial<DispatchDeps>): DispatchDeps {
   return {
     db,
     config: makeConfig(),
-    adapters: {},
+    accounts: [],
     decideFn: burnDecide,
     judgeRun: async () => ({ score: 5, reasons: 'ok', missing: '' }),
     loadVision: () => emptyVision(),
@@ -447,7 +516,7 @@ describe('dispatchTick', () => {
     });
     const judgeCalls: JudgeRunArgs[] = [];
     const deps = makeDeps({
-      adapters: { claude: fakeAdapter('claude', () => makeRunnerResult()) },
+      accounts: [fakeAccount('claude', () => makeRunnerResult())],
       judgeRun: async (args) => {
         judgeCalls.push(args);
         return { score: 5, reasons: 'all criteria met', missing: '' };
@@ -497,13 +566,13 @@ describe('dispatchTick', () => {
     let judgeIdx = 0;
     const feedbackSeenByRunner: Array<string | null | undefined> = [];
     const deps = makeDeps({
-      adapters: {
-        claude: fakeAdapter('claude', (args) => {
+      accounts: [
+        fakeAccount('claude', (args) => {
           feedbackSeenByRunner.push(args.judgeFeedback);
           expect(args.model).toBe('opus');
           return makeRunnerResult();
         }),
-      },
+      ],
       judgeRun: async () => verdicts[Math.min(judgeIdx++, verdicts.length - 1)]!,
     });
 
@@ -539,11 +608,11 @@ describe('dispatchTick', () => {
     const t2 = db.createTask({ projectId: q.id, title: 'second', status: 'ready', priority: 2 });
     let judgeCalls = 0;
     const deps = makeDeps({
-      adapters: {
-        claude: fakeAdapter('claude', () =>
+      accounts: [
+        fakeAccount('claude', () =>
           makeRunnerResult({ outcome: 'quota', summary: 'usage limit reached', exitCode: 1 }),
         ),
-      },
+      ],
       judgeRun: async () => {
         judgeCalls += 1;
         return { score: 5, reasons: '', missing: '' };
@@ -588,7 +657,7 @@ describe('dispatchTick', () => {
     const t1 = db.createTask({ projectId: pa.id, title: 'one', status: 'ready', priority: 1 });
     db.createTask({ projectId: pb.id, title: 'two', status: 'ready', priority: 2 });
     const deps = makeDeps({
-      adapters: { claude: fakeAdapter('claude', () => makeRunnerResult()) },
+      accounts: [fakeAccount('claude', () => makeRunnerResult())],
       // Outside any burn window — force must override the gating…
       decideFn: () => ({ action: 'idle', reason: 'outside windows' }),
       forceProvider: 'claude',
@@ -603,7 +672,7 @@ describe('dispatchTick', () => {
     const p = makeProject();
     db.createTask({ projectId: p.id, title: 'hot window', status: 'ready' });
     const deps = makeDeps({
-      adapters: { claude: fakeAdapter('claude', () => makeRunnerResult()) },
+      accounts: [fakeAccount('claude', () => makeRunnerResult())],
       decideFn: () => ({ action: 'pace-wait', reason: '5h window hot' }),
       forceProvider: 'claude',
     });
@@ -615,7 +684,7 @@ describe('dispatchTick', () => {
     const p = makeProject();
     const t = db.createTask({ projectId: p.id, title: 'not ready', status: 'todo' });
     const deps = makeDeps({
-      adapters: { claude: fakeAdapter('claude', () => makeRunnerResult()) },
+      accounts: [fakeAccount('claude', () => makeRunnerResult())],
       forceProvider: 'claude',
       forceTaskId: t.id,
     });
@@ -631,8 +700,12 @@ describe('dispatchTick', () => {
       const p = makeProject();
       const t = db.createTask({ projectId: p.id, title: 'long run', status: 'ready' });
       let polls = 0;
-      const adapter: ProviderAdapter = {
+      const adapter: AccountAdapter = {
+        key: 'claude',
         provider: 'claude',
+        label: 'personal',
+        priority: null,
+        configDir: null,
         async getUsage() {
           polls += 1;
           // Poll 1 (pre-launch decide) is cool; watchdog polls see a hot 5h
@@ -649,7 +722,7 @@ describe('dispatchTick', () => {
       };
       let judgeCalls = 0;
       const deps = makeDeps({
-        adapters: { claude: adapter },
+        accounts: [adapter],
         judgeRun: async () => {
           judgeCalls += 1;
           return { score: 5, reasons: '', missing: '' };
@@ -681,5 +754,178 @@ describe('dispatchTick', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// orderBurning (AUTO burn order among burn-eligible accounts)
+// ---------------------------------------------------------------------------
+
+describe('orderBurning', () => {
+  const NOW = Date.parse('2026-06-09T12:00:00.000Z');
+
+  function acct(key: string, priority: number | null = null): AccountAdapter {
+    return fakeAccount('claude', () => makeRunnerResult(), { key, priority, label: key });
+  }
+
+  function usageWith(over: Partial<UsageSnapshot>): UsageSnapshot {
+    return { ...healthyUsage('claude'), ...over };
+  }
+
+  it('manual priority beats every auto signal (lower = preferred)', () => {
+    const soonReset = usageWith({ sevenDayResetsAt: new Date(NOW + 1 * 60_000), sevenDayPct: 90 });
+    const lateReset = usageWith({ sevenDayResetsAt: new Date(NOW + 7 * 86_400_000), sevenDayPct: 5 });
+    const ordered = orderBurning([
+      { account: acct('claude', null), usage: soonReset }, // auto would win on reset+surplus
+      { account: acct('claude:work', 1), usage: lateReset },
+    ]);
+    expect(ordered.map((a) => a.key)).toEqual(['claude:work', 'claude']);
+  });
+
+  it('auto: soonest 7-day reset first; unknown reset sorts last', () => {
+    const ordered = orderBurning([
+      { account: acct('claude:c'), usage: usageWith({ sevenDayResetsAt: null }) },
+      { account: acct('claude:b'), usage: usageWith({ sevenDayResetsAt: new Date(NOW + 2 * 3_600_000) }) },
+      { account: acct('claude:a'), usage: usageWith({ sevenDayResetsAt: new Date(NOW + 1 * 3_600_000) }) },
+    ]);
+    expect(ordered.map((a) => a.key)).toEqual(['claude:a', 'claude:b', 'claude:c']);
+  });
+
+  it('auto tiebreak on equal resets: most weekly surplus left (lowest sevenDayPct) first', () => {
+    const reset = new Date(NOW + 3_600_000);
+    const ordered = orderBurning([
+      { account: acct('claude:hot'), usage: usageWith({ sevenDayResetsAt: reset, sevenDayPct: 80 }) },
+      { account: acct('claude:cool'), usage: usageWith({ sevenDayResetsAt: reset, sevenDayPct: 10 }) },
+      { account: acct('claude:mid'), usage: usageWith({ sevenDayResetsAt: reset, sevenDayPct: 40 }) },
+    ]);
+    expect(ordered.map((a) => a.key)).toEqual(['claude:cool', 'claude:mid', 'claude:hot']);
+  });
+
+  it('equal manual priorities fall through to the auto signals', () => {
+    const ordered = orderBurning([
+      { account: acct('claude:b', 2), usage: usageWith({ sevenDayResetsAt: new Date(NOW + 2_000) }) },
+      { account: acct('claude:a', 2), usage: usageWith({ sevenDayResetsAt: new Date(NOW + 1_000) }) },
+      { account: acct('claude:z', 1), usage: usageWith({ sevenDayResetsAt: new Date(NOW + 9_000) }) },
+    ]);
+    expect(ordered.map((a) => a.key)).toEqual(['claude:z', 'claude:a', 'claude:b']);
+  });
+
+  it('null usage sorts after accounts with live numbers (within the same priority tier)', () => {
+    const ordered = orderBurning([
+      { account: acct('claude:blind'), usage: null },
+      { account: acct('claude:live'), usage: usageWith({ sevenDayResetsAt: new Date(NOW + 1_000) }) },
+    ]);
+    expect(ordered.map((a) => a.key)).toEqual(['claude:live', 'claude:blind']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// dispatchTick across multiple claude accounts
+// ---------------------------------------------------------------------------
+
+describe('dispatchTick with multiple accounts', () => {
+  it("claims a 'claude:<id>' task with the matching account, not main", async () => {
+    const p = makeProject();
+    const t = db.createTask({
+      projectId: p.id,
+      title: 'work-only',
+      status: 'ready',
+      provider: 'claude:work',
+    });
+    const ranOn: string[] = [];
+    const mkRun = (key: string) => (args: RunTaskArgs) => {
+      void args;
+      ranOn.push(key);
+      return makeRunnerResult();
+    };
+    // Main sorts first in AUTO order (soonest reset unknown → equal; stable
+    // order keeps main first) but cannot claim the work-affinity task.
+    const deps = makeDeps({
+      accounts: [
+        fakeAccount('claude', mkRun('claude')),
+        fakeAccount('claude', mkRun('claude:work'), { key: 'claude:work', label: 'work' }),
+      ],
+    });
+
+    const res = await dispatchTick(deps);
+
+    expect(res.launched).toBe(1);
+    expect(res.results).toEqual([{ taskId: t.id, provider: 'claude:work', outcome: 'passed' }]);
+    expect(ranOn).toEqual(['claude:work']);
+
+    const runStarted = db
+      .listEventsAfter(0)
+      .filter((e) => e.type === 'run-started')
+      .map((e) => JSON.parse(e.data) as { provider?: string; account?: string });
+    expect(runStarted).toHaveLength(1);
+    expect(runStarted[0]).toMatchObject({ provider: 'claude', account: 'claude:work' });
+  });
+
+  it('usage/decision events are appended per account with the account key', async () => {
+    const deps = makeDeps({
+      accounts: [
+        fakeAccount('claude', () => makeRunnerResult()),
+        fakeAccount('claude', () => makeRunnerResult(), { key: 'claude:work', label: 'work' }),
+      ],
+      decideFn: () => ({ action: 'idle', reason: 'nothing to do' }),
+    });
+    await dispatchTick(deps);
+    const usageAccounts = db
+      .listEventsAfter(0)
+      .filter((e) => e.type === 'usage')
+      .map((e) => (JSON.parse(e.data) as { account?: string }).account);
+    expect(usageAccounts).toEqual(['claude', 'claude:work']);
+    const decisionAccounts = db
+      .listEventsAfter(0)
+      .filter((e) => e.type === 'decision')
+      .map((e) => (JSON.parse(e.data) as { account?: string }).account);
+    expect(decisionAccounts).toEqual(['claude', 'claude:work']);
+  });
+
+  it('forceProvider accepts an account key and pins that single account', async () => {
+    const p = makeProject();
+    const t = db.createTask({ projectId: p.id, title: 'any task', status: 'ready' });
+    const ranOn: string[] = [];
+    const deps = makeDeps({
+      accounts: [
+        fakeAccount('claude', () => {
+          ranOn.push('claude');
+          return makeRunnerResult();
+        }),
+        fakeAccount('claude', () => {
+          ranOn.push('claude:work');
+          return makeRunnerResult();
+        }, { key: 'claude:work', label: 'work' }),
+      ],
+      decideFn: () => ({ action: 'idle', reason: 'outside windows' }), // force overrides
+      forceProvider: 'claude:work',
+    });
+    const res = await dispatchTick(deps);
+    expect(res.launched).toBe(1);
+    expect(res.results).toEqual([{ taskId: t.id, provider: 'claude:work', outcome: 'passed' }]);
+    expect(ranOn).toEqual(['claude:work']);
+  });
+
+  it("forceProvider with a provider name matches every account of that provider ('claude' = main OR work)", async () => {
+    const p = makeProject();
+    db.createTask({ projectId: p.id, title: 'work-only', status: 'ready', provider: 'claude:work' });
+    const ranOn: string[] = [];
+    const deps = makeDeps({
+      accounts: [
+        fakeAccount('claude', () => {
+          ranOn.push('claude');
+          return makeRunnerResult();
+        }),
+        fakeAccount('claude', () => {
+          ranOn.push('claude:work');
+          return makeRunnerResult();
+        }, { key: 'claude:work', label: 'work' }),
+      ],
+      decideFn: () => ({ action: 'idle', reason: 'outside windows' }),
+      forceProvider: 'claude', // provider name → both accounts eligible; only work can claim
+    });
+    const res = await dispatchTick(deps);
+    expect(res.launched).toBe(1);
+    expect(ranOn).toEqual(['claude:work']);
   });
 });

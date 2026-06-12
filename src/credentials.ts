@@ -21,7 +21,7 @@ import type { OAuthCredentials } from './types.js';
 const KEYCHAIN_SERVICE_NAME = 'Claude Code-credentials';
 const KEYCHAIN_TIMEOUT_MS = 3_000;
 
-/** Test seams. Production callers pass nothing. */
+/** Test seams + the per-account configDir selector. Production callers pass nothing or {configDir}. */
 export interface CredentialOverrides {
   homeDir?: string;
   env?: NodeJS.ProcessEnv;
@@ -30,12 +30,34 @@ export interface CredentialOverrides {
   readKeychainItem?: (service: string, account?: string) => string;
   /** Account name to try first; null disables the account-scoped pass. */
   username?: string | null;
+  /**
+   * Explicit Claude Code profile dir for a specific account. When set
+   * (non-null), credentials are read ONLY from this dir's sources: the
+   * keychain service derived from it (hashed for custom dirs — no legacy
+   * fallback, so accounts never bleed into each other) and
+   * <configDir>/.credentials.json. null/undefined = the default flow
+   * ($CLAUDE_CONFIG_DIR / ~/.claude with legacy fallbacks).
+   */
+  configDir?: string | null;
 }
 
 /** Claude Code config dir: $CLAUDE_CONFIG_DIR or ~/.claude. */
 export function getClaudeConfigDir(homeDir: string, env: NodeJS.ProcessEnv): string {
   const envDir = env.CLAUDE_CONFIG_DIR?.trim();
   return envDir ? envDir : path.join(homeDir, '.claude');
+}
+
+/**
+ * The single keychain service name for a config dir: the default service for
+ * ~/.claude, `<service>-<sha256(normalized absolute dir)[:8]>` for custom
+ * dirs (matches Claude Code's own derivation).
+ */
+export function getKeychainServiceName(configDir: string, homeDir: string): string {
+  const normalizedConfigDir = path.normalize(path.resolve(configDir));
+  const normalizedDefaultDir = path.normalize(path.resolve(path.join(homeDir, '.claude')));
+  if (normalizedConfigDir === normalizedDefaultDir) return KEYCHAIN_SERVICE_NAME;
+  const hash = createHash('sha256').update(normalizedConfigDir).digest('hex').slice(0, 8);
+  return `${KEYCHAIN_SERVICE_NAME}-${hash}`;
 }
 
 /**
@@ -49,15 +71,7 @@ export function getKeychainServiceNames(
   env: NodeJS.ProcessEnv,
 ): string[] {
   const defaultDir = path.normalize(path.resolve(path.join(homeDir, '.claude')));
-  const names: string[] = [];
-
-  const normalizedConfigDir = path.normalize(path.resolve(configDir));
-  if (normalizedConfigDir === defaultDir) {
-    names.push(KEYCHAIN_SERVICE_NAME);
-  } else {
-    const hash = createHash('sha256').update(normalizedConfigDir).digest('hex').slice(0, 8);
-    names.push(`${KEYCHAIN_SERVICE_NAME}-${hash}`);
-  }
+  const names: string[] = [getKeychainServiceName(configDir, homeDir)];
 
   const envConfigDir = env.CLAUDE_CONFIG_DIR?.trim();
   if (envConfigDir) {
@@ -124,7 +138,12 @@ function readKeychainCredentials(now: number, overrides: CredentialOverrides): O
   const readItem = overrides.readKeychainItem ?? defaultReadKeychainItem;
   const username = overrides.username !== undefined ? overrides.username : defaultUsername();
 
-  const serviceNames = getKeychainServiceNames(getClaudeConfigDir(homeDir, env), homeDir, env);
+  // An explicit per-account configDir pins the lookup to that dir's derived
+  // service ONLY — no legacy fallback, or a custom account with a locked/empty
+  // keychain item would silently serve the main account's credentials.
+  const serviceNames = overrides.configDir
+    ? [getKeychainServiceName(overrides.configDir, homeDir)]
+    : getKeychainServiceNames(getClaudeConfigDir(homeDir, env), homeDir, env);
 
   // Pass 1: account-scoped lookups; pass 2: generic fallback without -a.
   const accountVariants: Array<string | undefined> = username ? [username, undefined] : [undefined];
@@ -147,7 +166,8 @@ function readKeychainCredentials(now: number, overrides: CredentialOverrides): O
 function readFileCredentials(now: number, overrides: CredentialOverrides): OAuthCredentials | null {
   const homeDir = overrides.homeDir ?? os.homedir();
   const env = overrides.env ?? process.env;
-  const credentialsPath = path.join(getClaudeConfigDir(homeDir, env), '.credentials.json');
+  const configDir = overrides.configDir ?? getClaudeConfigDir(homeDir, env);
+  const credentialsPath = path.join(configDir, '.credentials.json');
   try {
     if (!fs.existsSync(credentialsPath)) return null;
     const content = fs.readFileSync(credentialsPath, 'utf8');
@@ -159,7 +179,9 @@ function readFileCredentials(now: number, overrides: CredentialOverrides): OAuth
 
 /**
  * Read Claude Code OAuth credentials: Keychain first, then the credentials
- * file. Returns null when nothing valid/unexpired is found.
+ * file. Pass overrides.configDir for a specific account's profile dir
+ * (hashed keychain service + <configDir>/.credentials.json fallback).
+ * Returns null when nothing valid/unexpired is found.
  */
 export function readCredentials(now: number, overrides: CredentialOverrides = {}): OAuthCredentials | null {
   return readKeychainCredentials(now, overrides) ?? readFileCredentials(now, overrides);

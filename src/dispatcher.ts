@@ -1,5 +1,5 @@
 /**
- * surplus — dispatcher: provider-aware claim + run + judge orchestration.
+ * surplus — dispatcher: account-aware claim + run + judge orchestration.
  *
  * Fully dependency-injected: imports only contracts from types.js (plus the
  * type-only SurplusDb shape from db.js), so it unit-tests with fakes.
@@ -8,12 +8,12 @@ import {
   LOGS_DIR,
   SURPLUS_DIR_NAME,
   WORKTREES_DIR,
+  type AccountAdapter,
   type DecideInput,
   type Decision,
   type JudgeVerdict,
   type ProjectRow,
   type Provider,
-  type ProviderAdapter,
   type RunOutcome,
   type RunnerResult,
   type SurplusConfig,
@@ -38,18 +38,26 @@ export interface JudgeRunArgs {
 export interface DispatchDeps {
   db: SurplusDb;
   config: SurplusConfig;
-  adapters: Partial<Record<Provider, ProviderAdapter>>;
+  /** Burnable accounts (claudeAccountAdapters + codexAccountAdapter), config order. */
+  accounts: AccountAdapter[];
   decideFn: (input: DecideInput) => Decision;
-  /** Judge always runs claude-side, regardless of which provider did the work. */
+  /** Judge ALWAYS runs on the main claude account, regardless of which account did the work. */
   judgeRun: (args: JudgeRunArgs) => Promise<JudgeVerdict>;
   loadVision: (project: ProjectRow) => Vision;
   now?: () => number;
   /** True when ~/.surplus/PAUSED exists. Checked live (kill switch). */
   paused: () => boolean;
   log?: (msg: string) => void;
-  /** Manual burn: skip decide() gating for this provider. Still refuses when paused. */
-  forceProvider?: Provider;
-  /** Manual burn: claim exactly this task (must be 'ready' and provider-compatible). */
+  /**
+   * Manual burn: skip decide() window gating ('idle'/'stop') for the matching
+   * accounts. Accepts an AccountKey ('claude', 'claude:work', 'codex') to pin
+   * one account, OR a provider name ('claude'|'codex') = every account of
+   * that provider in AUTO burn order. Never overrides pause or 'pace-wait'.
+   * (NOTE: 'claude' is both the provider name and the main account's key —
+   * matching by key-or-provider makes the two readings equivalent.)
+   */
+  forceProvider?: string;
+  /** Manual burn: claim exactly this task (must be 'ready' and account-compatible). */
   forceTaskId?: string;
   /** Defaults to ~/.surplus/logs and ~/.surplus/worktrees. */
   logsDir?: string;
@@ -58,14 +66,13 @@ export interface DispatchDeps {
 
 export interface DispatchResult {
   launched: number;
+  /** `provider` carries the claiming ACCOUNT key ('claude' | 'claude:<id>' | 'codex'). */
   results: Array<{ taskId: string; provider: string; outcome: string }>;
 }
 
 // ---------------------------------------------------------------------------
 // Internals
 // ---------------------------------------------------------------------------
-
-const PROVIDERS: readonly Provider[] = ['claude', 'codex'];
 
 /** Outcomes where judging is pointless — the work session never completed. */
 const JUDGE_SKIP: ReadonlySet<RunOutcome> = new Set(['error', 'timeout', 'killed', 'quota']);
@@ -100,57 +107,94 @@ function unavailableSnapshot(provider: Provider, now: number, error: string): Us
   };
 }
 
+interface AccountEval {
+  account: AccountAdapter;
+  usage: UsageSnapshot;
+  decision: Decision;
+}
+
 /**
- * Step 1: per enabled provider with an adapter, fetch usage (adapters cache),
- * run decide(), and append 'usage' + 'decision' events tagged with the provider.
+ * Step 1: per account of an enabled provider, fetch usage (adapters cache
+ * PER ACCOUNT), run decide(), and append 'usage' + 'decision' events tagged
+ * with both the provider and the account key.
  */
-async function evaluateProviders(
-  deps: DispatchDeps,
-  nowFn: () => number,
-): Promise<Partial<Record<Provider, Decision>>> {
-  const decisions: Partial<Record<Provider, Decision>> = {};
-  for (const provider of PROVIDERS) {
-    if (!deps.config.providers[provider]?.enabled) continue;
-    const adapter = deps.adapters[provider];
-    if (!adapter) continue;
+async function evaluateAccounts(deps: DispatchDeps, nowFn: () => number): Promise<AccountEval[]> {
+  const evals: AccountEval[] = [];
+  for (const account of deps.accounts) {
+    if (!deps.config.providers[account.provider]?.enabled) continue;
 
     let usage: UsageSnapshot | null = null;
     let usageError = 'usage-unavailable';
     try {
-      usage = await adapter.getUsage();
+      usage = await account.getUsage();
     } catch (err) {
       usageError = redact(errMessage(err));
       usage = null;
     }
-    const snapshot = usage ?? unavailableSnapshot(provider, nowFn(), usageError);
+    const snapshot = usage ?? unavailableSnapshot(account.provider, nowFn(), usageError);
     const decision = deps.decideFn({
       usage: snapshot,
       config: deps.config,
       now: nowFn(),
       paused: deps.paused(),
     });
-    deps.db.appendEvent('usage', null, { ...snapshot, provider });
-    deps.db.appendEvent('decision', null, { provider, ...decision });
-    decisions[provider] = decision;
+    deps.db.appendEvent('usage', null, {
+      ...snapshot,
+      provider: account.provider,
+      account: account.key,
+    });
+    deps.db.appendEvent('decision', null, {
+      provider: account.provider,
+      account: account.key,
+      ...decision,
+    });
+    evals.push({ account, usage: snapshot, decision });
   }
-  return decisions;
+  return evals;
 }
 
-/** Step 2: providers allowed to burn this tick. */
-function computeBurning(
-  deps: DispatchDeps,
-  decisions: Partial<Record<Provider, Decision>>,
-): Provider[] {
+/**
+ * AUTO burn order among burn-eligible accounts (pure, exported for tests):
+ *   1. manual priority asc (null = +Infinity, i.e. manual always wins);
+ *   2. sevenDayResetsAt asc — the soonest-expiring quota burns first
+ *      (unknown reset sorts last);
+ *   3. sevenDayPct asc — most weekly surplus left burns first (unknown
+ *      utilization sorts last).
+ * Manual priority only REORDERS eligible accounts — windows/reserves still
+ * gate each account independently via its own decide() call.
+ */
+export function orderBurning(
+  candidates: Array<{ account: AccountAdapter; usage: UsageSnapshot | null }>,
+): AccountAdapter[] {
+  const resetAt = (u: UsageSnapshot | null): number =>
+    u?.sevenDayResetsAt ? u.sevenDayResetsAt.getTime() : Number.POSITIVE_INFINITY;
+  const usedPct = (u: UsageSnapshot | null): number => u?.sevenDayPct ?? Number.POSITIVE_INFINITY;
+  return [...candidates]
+    .sort(
+      (a, b) =>
+        (a.account.priority ?? Number.POSITIVE_INFINITY) -
+          (b.account.priority ?? Number.POSITIVE_INFINITY) ||
+        resetAt(a.usage) - resetAt(b.usage) ||
+        usedPct(a.usage) - usedPct(b.usage),
+    )
+    .map((c) => c.account);
+}
+
+/** Step 2: accounts allowed to burn this tick, in AUTO burn order. */
+function computeBurning(deps: DispatchDeps, evals: AccountEval[]): AccountAdapter[] {
   if (deps.forceProvider) {
     // Force overrides decide() window gating ('idle'/'stop'), but never the
     // kill switch, and — per the /api/burn contract "ignores windows,
     // respects pacing" — never a 'pace-wait' (which already folds in the
-    // reserve 5h floor).
+    // reserve 5h floor). An AccountKey pins one account; a provider name
+    // matches every account of that provider.
     if (deps.paused()) return [];
-    if (decisions[deps.forceProvider]?.action === 'pace-wait') return [];
-    return deps.adapters[deps.forceProvider] ? [deps.forceProvider] : [];
+    const matched = evals.filter(
+      (e) => e.account.key === deps.forceProvider || e.account.provider === deps.forceProvider,
+    );
+    return orderBurning(matched.filter((e) => e.decision.action !== 'pace-wait'));
   }
-  return PROVIDERS.filter((p) => decisions[p]?.action === 'burn');
+  return orderBurning(evals.filter((e) => e.decision.action === 'burn'));
 }
 
 function buildFeedback(
@@ -181,14 +225,14 @@ interface RunOneOutcome {
 async function runOne(
   deps: DispatchDeps,
   task: TaskRow,
-  provider: Provider,
-  adapter: ProviderAdapter,
+  account: AccountAdapter,
   nowFn: () => number,
   log: (msg: string) => void,
   logsDir: string,
   worktreesDir: string,
 ): Promise<RunOneOutcome> {
   const db = deps.db;
+  const provider = account.provider;
 
   const project = db.getProject(task.projectId);
   if (!project) {
@@ -218,12 +262,20 @@ async function runOne(
   const effort = task.effort ?? vision.effort ?? project.effort ?? defaults.effort;
 
   const run = db.createRun({ taskId: task.id, provider, startedAt: nowFn(), model, effort });
-  db.appendEvent('run-started', task.id, { runId: run.id, provider, model, effort });
-  log(`dispatch: run ${run.id} started for task ${task.id} on ${provider} (${model}/${effort})`);
+  db.appendEvent('run-started', task.id, {
+    runId: run.id,
+    provider,
+    account: account.key,
+    model,
+    effort,
+  });
+  log(`dispatch: run ${run.id} started for task ${task.id} on ${account.key} (${model}/${effort})`);
 
-  // Mid-run usage watchdog: polls this provider's usage on a cadence and
-  // aborts the worker when a reserve ceiling is crossed, so a long run can't
-  // starve other agents (OpenClaw/Hermes crons) sharing the subscription.
+  // Mid-run usage watchdog: polls the CLAIMING ACCOUNT's usage on a cadence
+  // and aborts the worker when a reserve ceiling is crossed, so a long run
+  // can't starve other agents (OpenClaw/Hermes crons) sharing that account's
+  // subscription. Reserve floors apply PER ACCOUNT: each account's own
+  // getUsage feeds its own ceilings.
   // Ceilings get +5pct slack over the launch thresholds (capped at 95) so a
   // run isn't killed for the last request that tipped the launch check.
   const reserve = deps.config.reserve;
@@ -241,7 +293,7 @@ async function runOne(
   // late-resolving poll from aborting after the run already finished.
   let runDone = false;
   const watchdog = setInterval(() => {
-    void adapter
+    void account
       .getUsage()
       .then((u) => {
         if (runDone || u == null || u.unavailable || abort.signal.aborted) return;
@@ -267,7 +319,10 @@ async function runOne(
 
   let result: RunnerResult;
   try {
-    result = await adapter.runTask({
+    // The account adapter injects its own configDir/accountKey into the
+    // runner args (see providers/claude.ts) — nothing account-specific to
+    // pass here.
+    result = await account.runTask({
       task,
       project,
       vision,
@@ -389,18 +444,17 @@ export async function dispatchTick(deps: DispatchDeps): Promise<DispatchResult> 
   const results: DispatchResult['results'] = [];
   let launched = 0;
 
-  // Step 1+2: evaluate every enabled provider, compute the burning set.
-  let decisions = await evaluateProviders(deps, nowFn);
-  let burning = computeBurning(deps, decisions);
+  // Step 1+2: evaluate every account, compute the AUTO-ordered burning set.
+  let burning = computeBurning(deps, await evaluateAccounts(deps, nowFn));
   if (burning.length === 0) {
-    log('dispatch: no provider in burn mode');
+    log('dispatch: no account in burn mode');
     return { launched, results };
   }
 
-  let rr = 0; // round-robin cursor into `burning`
   let forcedClaimed = false;
 
-  // Step 3: claim/run loop, bounded by maxConcurrent.
+  // Step 3: claim/run loop, bounded by maxConcurrent. Accounts are tried in
+  // burn order — the most-preferred burning account claims first every cycle.
   while (db.countRunning() < deps.config.dispatcher.maxConcurrent) {
     if (deps.paused()) {
       log('dispatch: paused — stopping tick');
@@ -408,67 +462,70 @@ export async function dispatchTick(deps: DispatchDeps): Promise<DispatchResult> 
     }
 
     let claimedTask: TaskRow | null = null;
-    let claimedProvider: Provider | null = null;
-    for (let i = 0; i < burning.length; i++) {
-      const provider = burning[(rr + i) % burning.length]!;
+    let claimedAccount: AccountAdapter | null = null;
+    for (const account of burning) {
       let task: TaskRow | null = null;
       if (deps.forceTaskId) {
         if (!forcedClaimed) {
           // Single guarded UPDATE in the db — atomic against a concurrent
           // tick's claim, so two processes can never run the same task.
-          task = db.claimTaskById(deps.forceTaskId, nowFn(), provider);
+          task = db.claimTaskById(deps.forceTaskId, nowFn(), account.provider, account.key);
           if (task) forcedClaimed = true;
         }
       } else {
         // maxConcurrent rides inside the claim transaction so the global
         // concurrency cap holds across processes, not just within this loop.
-        task = db.claimNextReadyTask(nowFn(), provider, deps.config.dispatcher.maxConcurrent);
+        // Affinity match: task 'any' | account.provider | account.key.
+        task = db.claimNextReadyTask(
+          nowFn(),
+          account.provider,
+          deps.config.dispatcher.maxConcurrent,
+          account.key,
+        );
       }
       if (task) {
         claimedTask = task;
-        claimedProvider = provider;
-        rr = (rr + i + 1) % burning.length;
+        claimedAccount = account;
         break;
       }
     }
-    if (!claimedTask || !claimedProvider) break; // nothing claimable for any burning provider
+    if (!claimedTask || !claimedAccount) break; // nothing claimable for any burning account
 
-    const adapter = deps.adapters[claimedProvider]!;
     const { outcome, respawnGuard } = await runOne(
       deps,
       claimedTask,
-      claimedProvider,
-      adapter,
+      claimedAccount,
       nowFn,
       log,
       logsDir,
       worktreesDir,
     );
     launched += 1;
-    results.push({ taskId: claimedTask.id, provider: claimedProvider, outcome });
+    results.push({ taskId: claimedTask.id, provider: claimedAccount.key, outcome });
 
     if (respawnGuard) {
       db.appendEvent('decision', null, {
         action: 'stop',
-        reason: `respawn guard: ${claimedProvider} auth/quota error`,
+        reason: `respawn guard: ${claimedAccount.key} auth/quota error`,
       });
-      log(`dispatch: respawn guard tripped on ${claimedProvider} — stopping tick`);
+      log(`dispatch: respawn guard tripped on ${claimedAccount.key} — stopping tick`);
       break;
     }
 
-    // Manual burns are one-shot (the /api/burn contract): a forced provider
+    // Manual burns are one-shot (the /api/burn contract): a forced account
     // without a taskId must not drain the entire ready queue.
     if (deps.forceTaskId || deps.forceProvider) break;
 
-    // Step 6: re-evaluate cheaply (usage cached by adapters); drop non-burners.
-    decisions = await evaluateProviders(deps, nowFn);
-    const stillBurning = computeBurning(deps, decisions);
-    burning = burning.filter((p) => stillBurning.includes(p));
+    // Step 6: re-evaluate cheaply (usage cached per account); drop accounts
+    // that stopped burning and adopt the fresh AUTO order (quota shifts as we
+    // burn) — but never ADD accounts that were not burning at tick start.
+    const stillBurning = computeBurning(deps, await evaluateAccounts(deps, nowFn));
+    const startKeys = new Set(burning.map((a) => a.key));
+    burning = stillBurning.filter((a) => startKeys.has(a.key));
     if (burning.length === 0) {
-      log('dispatch: no provider still burning — stopping tick');
+      log('dispatch: no account still burning — stopping tick');
       break;
     }
-    rr = rr % burning.length;
   }
 
   return { launched, results };

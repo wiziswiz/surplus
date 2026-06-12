@@ -10,8 +10,10 @@ import {
   parseDate,
   parseRetryAfterSeconds,
   parseUtilization,
+  usageCacheFile,
 } from '../src/usage.js';
 import {
+  getKeychainServiceName,
   getKeychainServiceNames,
   parseCredentialsData,
   readCredentials,
@@ -190,6 +192,18 @@ describe('getKeychainServiceNames', () => {
   });
 });
 
+describe('getKeychainServiceName (per-account)', () => {
+  const home = '/Users/someone';
+
+  it('returns the plain service for the default dir and a stable 8-hex suffix otherwise', () => {
+    expect(getKeychainServiceName(path.join(home, '.claude'), home)).toBe('Claude Code-credentials');
+    const custom = getKeychainServiceName('/custom/claude-work', home);
+    expect(custom).toMatch(/^Claude Code-credentials-[0-9a-f]{8}$/);
+    // Stable: normalization makes equivalent paths hash identically.
+    expect(getKeychainServiceName('/custom//claude-work/', home)).toBe(custom);
+  });
+});
+
 describe('readCredentials', () => {
   let homeDir: string;
 
@@ -257,6 +271,80 @@ describe('readCredentials', () => {
       readKeychainItem: throwMissing,
     });
     expect(creds).toBeNull();
+  });
+
+  it('configDir override: file fallback reads <configDir>/.credentials.json, not ~/.claude', () => {
+    // Seed DIFFERENT tokens in the default dir and the account dir.
+    const claudeDir = path.join(homeDir, '.claude');
+    fs.mkdirSync(claudeDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(claudeDir, '.credentials.json'),
+      JSON.stringify(oauthJson({ accessToken: 'main-token-not-real' })),
+    );
+    const workDir = path.join(homeDir, 'claude-work');
+    fs.mkdirSync(workDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(workDir, '.credentials.json'),
+      JSON.stringify(oauthJson({ accessToken: 'work-token-not-real' })),
+    );
+
+    const creds = readCredentials(NOW, {
+      homeDir,
+      env: {},
+      platform: 'darwin',
+      username: 'someone',
+      readKeychainItem: throwMissing,
+      configDir: workDir,
+    });
+    expect(creds?.accessToken).toBe('work-token-not-real');
+
+    // No configDir → the default dir's file wins as before.
+    const main = readCredentials(NOW, {
+      homeDir,
+      env: {},
+      platform: 'darwin',
+      username: 'someone',
+      readKeychainItem: throwMissing,
+    });
+    expect(main?.accessToken).toBe('main-token-not-real');
+  });
+
+  it('configDir override: keychain lookup tries ONLY the hashed per-dir service (no legacy fallback)', () => {
+    const workDir = path.join(homeDir, 'claude-work');
+    const servicesTried: string[] = [];
+    const creds = readCredentials(NOW, {
+      homeDir,
+      env: { CLAUDE_CONFIG_DIR: '/somewhere/else' }, // must be ignored for explicit dirs
+      platform: 'darwin',
+      username: 'someone',
+      configDir: workDir,
+      readKeychainItem: (service) => {
+        servicesTried.push(service);
+        throw new Error('not found');
+      },
+    });
+    expect(creds).toBeNull();
+    const expected = getKeychainServiceName(workDir, homeDir);
+    expect(expected).toMatch(/^Claude Code-credentials-[0-9a-f]{8}$/);
+    // Account-scoped + generic passes both query the SAME single service —
+    // never the plain legacy service that would serve the main account.
+    expect([...new Set(servicesTried)]).toEqual([expected]);
+  });
+
+  it('configDir override pointing at the default dir keeps the plain service name', () => {
+    const servicesTried: string[] = [];
+    readCredentials(NOW, {
+      homeDir,
+      env: {},
+      platform: 'darwin',
+      username: 'someone',
+      configDir: path.join(homeDir, '.claude'),
+      readKeychainItem: (service) => {
+        servicesTried.push(service);
+        throw new Error('not found');
+      },
+    });
+    expect([...new Set(servicesTried)]).toEqual(['Claude Code-credentials']);
   });
 });
 
@@ -522,5 +610,104 @@ describe('getUsage', () => {
     await callGetUsage();
     const raw = fs.readFileSync(path.join(cacheDir, '.usage-cache.json'), 'utf8');
     expect(raw).not.toContain('test-token-not-real');
+  });
+
+  it('forwards the account configDir to the credential reader', async () => {
+    const dirsSeen: Array<string | null | undefined> = [];
+    await callGetUsage({
+      accountKey: 'claude:work',
+      configDir: '/opt/claude-work',
+      readCredentialsImpl: (_now: number, configDir?: string | null) => {
+        dirsSeen.push(configDir);
+        return CREDS;
+      },
+    });
+    expect(dirsSeen).toEqual(['/opt/claude-work']);
+  });
+
+  it('isolates the cache per accountKey — accounts never serve each other numbers', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(okBody(11, 11)));
+    const main = await callGetUsage(); // accountKey absent = main
+    expect(main?.fiveHourPct).toBe(11);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Same cacheDir, fresh main cache — a different account must NOT be
+    // served from it: it fetches its own numbers into its own file.
+    fetchMock.mockResolvedValueOnce(jsonResponse(okBody(77, 88)));
+    const work = await callGetUsage({ accountKey: 'claude:work' });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(work?.fiveHourPct).toBe(77);
+    expect(fs.existsSync(path.join(cacheDir, '.usage-cache.json'))).toBe(true);
+    expect(fs.existsSync(path.join(cacheDir, '.usage-cache-claude-work.json'))).toBe(true);
+
+    // Each account is now served from its OWN cache without refetching.
+    expect((await callGetUsage())?.fiveHourPct).toBe(11);
+    expect((await callGetUsage({ accountKey: 'claude:work' }))?.fiveHourPct).toBe(77);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("accountKey 'claude' (main) keeps the legacy cache file (back-compat)", async () => {
+    await callGetUsage({ accountKey: 'claude' });
+    expect(fs.existsSync(path.join(cacheDir, '.usage-cache.json'))).toBe(true);
+    expect(fs.existsSync(path.join(cacheDir, '.usage-cache-claude.json'))).toBe(false);
+  });
+
+  it('cache identity includes the configDir — rebinding an account to a new profile dir is a MISS', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(okBody(11, 11)));
+    const before = await callGetUsage({ accountKey: 'claude:work', configDir: '/opt/profile-a' });
+    expect(before?.fiveHourPct).toBe(11);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Same account key, fresh cache, DIFFERENT credential source: the old
+    // subscription's snapshot must not be served to decide()/the watchdog.
+    fetchMock.mockResolvedValueOnce(jsonResponse(okBody(93, 94)));
+    const after = await callGetUsage({ accountKey: 'claude:work', configDir: '/opt/profile-b' });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(after?.fiveHourPct).toBe(93);
+
+    // Same key + same dir again: served from cache, no refetch.
+    const cached = await callGetUsage({ accountKey: 'claude:work', configDir: '/opt/profile-b' });
+    expect(cached?.fiveHourPct).toBe(93);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('rebinding also discards lastGoodData/429 backoff from the previous credential source', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(okBody(11, 11)));
+    await callGetUsage({ accountKey: 'claude:work', configDir: '/opt/profile-a' });
+    clock = NOW + 6 * 60_000; // success TTL elapsed
+    fetchMock.mockResolvedValueOnce(jsonResponse({}, { status: 429 }));
+    const limited = await callGetUsage({ accountKey: 'claude:work', configDir: '/opt/profile-a' });
+    expect(limited?.error).toBe('rate-limited');
+    expect(limited?.fiveHourPct).toBe(11); // profile-a's lastGoodData
+
+    // Rebind to profile-b inside profile-a's backoff window: profile-a's
+    // backoff and lastGoodData must not gate or feed the new subscription.
+    fetchMock.mockResolvedValueOnce(jsonResponse(okBody(55, 56)));
+    const rebound = await callGetUsage({ accountKey: 'claude:work', configDir: '/opt/profile-b' });
+    expect(rebound?.unavailable).toBe(false);
+    expect(rebound?.error).toBeUndefined();
+    expect(rebound?.fiveHourPct).toBe(55);
+  });
+
+  it('legacy main cache files without a configDir field stay valid (read as null)', async () => {
+    await callGetUsage(); // writes the main cache
+    const cachePath = path.join(cacheDir, '.usage-cache.json');
+    const raw = JSON.parse(fs.readFileSync(cachePath, 'utf8')) as Record<string, unknown>;
+    expect(raw.configDir).toBeNull();
+    delete raw.configDir; // simulate a pre-feature cache file
+    fs.writeFileSync(cachePath, JSON.stringify(raw));
+    const served = await callGetUsage();
+    expect(served?.fiveHourPct).toBe(42);
+    expect(fetchMock).toHaveBeenCalledTimes(1); // still a cache HIT
+  });
+});
+
+describe('usageCacheFile', () => {
+  it('maps main/absent to the legacy file and other keys to sanitized per-account files', () => {
+    expect(usageCacheFile()).toBe('.usage-cache.json');
+    expect(usageCacheFile('claude')).toBe('.usage-cache.json');
+    expect(usageCacheFile('claude:work')).toBe('.usage-cache-claude-work.json');
+    expect(usageCacheFile('codex')).toBe('.usage-cache-codex.json');
+    expect(usageCacheFile('Claude:Work!!')).toBe('.usage-cache-claude-work.json');
   });
 });

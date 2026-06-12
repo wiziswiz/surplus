@@ -1,5 +1,32 @@
 import type { ConfigDto, Provider, ProviderPref, TaskDto } from './types';
 
+/** Provider behind an affinity pref ('claude:<id>' → 'claude'; 'any' falls back to claude). */
+export function providerOfPref(pref: ProviderPref): Provider {
+  return pref === 'codex' ? 'codex' : 'claude';
+}
+
+/**
+ * Affinity picker options for the task/project drawers: any + plain providers
+ * + one entry per extra claude account (label shown, key submitted). The main
+ * account's key IS 'claude', so it never appears twice.
+ */
+export function affinityOptions(
+  config: ConfigDto | undefined,
+): Array<{ value: ProviderPref; text: string }> {
+  const extras = (config?.providers?.claude?.accounts ?? [])
+    .filter((a) => a.id !== 'main')
+    .map((a) => ({
+      value: `claude:${a.id}` as ProviderPref,
+      text: `claude · ${a.label || a.id}`,
+    }));
+  return [
+    { value: 'any', text: 'any' },
+    { value: 'claude', text: 'claude' },
+    ...extras,
+    { value: 'codex', text: 'codex' },
+  ];
+}
+
 /** '2d 14h' / '1h 04m' / '12m 30s' countdown to an ISO timestamp. */
 export function fmtCountdown(targetIso: string | null, now: number): string {
   if (!targetIso) return '—';
@@ -42,25 +69,34 @@ export function effectiveModelEffort(
   task: TaskDto,
   config: ConfigDto | undefined,
 ): { model: string; effort: string } {
-  const prov: Provider = task.provider === 'codex' ? 'codex' : 'claude';
-  const defaults = config?.providers?.[prov]?.defaults;
+  const defaults = config?.providers?.[providerOfPref(task.provider)]?.defaults;
   return {
     model: task.model ?? defaults?.model ?? '—',
     effort: task.effort ?? defaults?.effort ?? '—',
   };
 }
 
-export const PROVIDER_TINT: Record<ProviderPref, string> = {
+const TINT: Record<Provider | 'any', string> = {
   claude: 'bg-ember/15 text-ember',
   codex: 'bg-jade/15 text-jade',
   any: 'bg-raised text-dim', // raised, not overlay — badge sits ON overlay cards
 };
 
-export const MODEL_OPTIONS: Record<ProviderPref, string[]> = {
+/** Badge tint for any affinity pref — account keys take their provider's tint. */
+export function providerTint(pref: ProviderPref): string {
+  return pref === 'any' ? TINT.any : TINT[providerOfPref(pref)];
+}
+
+export const MODEL_OPTIONS: Record<Provider | 'any', string[]> = {
   claude: ['opus', 'sonnet', 'haiku'],
   codex: ['gpt-5.1-codex', 'gpt-5.1-codex-mini', 'gpt-5.1'],
   any: ['opus', 'sonnet', 'haiku', 'gpt-5.1-codex', 'gpt-5.1-codex-mini'],
 };
+
+/** Model picker options for any affinity pref ('claude:<id>' → claude models). */
+export function modelOptionsFor(pref: ProviderPref): string[] {
+  return pref === 'any' ? MODEL_OPTIONS.any : MODEL_OPTIONS[providerOfPref(pref)];
+}
 
 export const EFFORT_OPTIONS = ['low', 'medium', 'high', 'xhigh', 'max'];
 

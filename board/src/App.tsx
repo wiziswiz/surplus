@@ -82,6 +82,13 @@ export default function App() {
     }
   }, []);
 
+  // Deep link from the menu-bar app: /?settings=1 opens the settings panel.
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get('settings') === '1') {
+      setShowSettings(true);
+    }
+  }, []);
+
   // Initial load + periodic state fallback.
   useEffect(() => {
     void refreshAll();
@@ -311,6 +318,7 @@ export default function App() {
       {showSettings && state && (
         <SettingsPanel
           config={state.config}
+          state={state}
           onClose={() => setShowSettings(false)}
           onSaved={onConfigSaved}
         />

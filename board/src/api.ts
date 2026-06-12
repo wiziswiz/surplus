@@ -84,10 +84,12 @@ export const installBoardService = () =>
 /** Mirrors the dispatcher's DispatchResult (returned in the burn response). */
 export interface BurnResultDto {
   launched: number;
+  /** results[].provider carries the ACCOUNT key ('claude' | 'claude:<id>' | 'codex'). */
   results: Array<{ taskId: string; provider: string; outcome: string }>;
 }
 
-export const burnNow = (taskId?: string, provider?: Provider) =>
+/** `provider` accepts a provider name or an AccountKey ('claude:<id>'). */
+export const burnNow = (taskId?: string, provider?: Provider | string) =>
   api<{ ok: boolean; result: BurnResultDto | null }>('/api/burn', {
     method: 'POST',
     body: JSON.stringify({ taskId, provider }),

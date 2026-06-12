@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { burnNow, getTaskDetail, patchTask } from '../api';
 import type { ConfigDto, ProjectDto, ProviderPref, RunDto, TaskDetailDto } from '../types';
-import { EFFORT_OPTIONS, effectiveModelEffort, fmtDuration, fmtRel, MODEL_OPTIONS } from '../lib';
+import {
+  affinityOptions,
+  EFFORT_OPTIONS,
+  effectiveModelEffort,
+  fmtDuration,
+  fmtRel,
+  modelOptionsFor,
+} from '../lib';
 import { AttemptDots, ProviderBadge, ScoreRing } from './TaskCard';
 import { SlideOver } from './SlideOver';
 import { useNow } from '../useNow';
@@ -118,9 +125,16 @@ export function Drawer({
                     onChange={(e) => void apply({ provider: e.target.value as ProviderPref })}
                     className={SELECT_CLS}
                   >
-                    <option value="any">any</option>
-                    <option value="claude">claude</option>
-                    <option value="codex">codex</option>
+                    {affinityOptions(config).map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.text}
+                      </option>
+                    ))}
+                    {/* Preserve a stale account affinity (account removed) so the
+                        select doesn't silently snap to another value. */}
+                    {!affinityOptions(config).some((o) => o.value === task.provider) && (
+                      <option value={task.provider}>{task.provider}</option>
+                    )}
                   </select>
                 </label>
                 <div className="flex flex-col gap-1 text-[11px] text-faint">
@@ -151,7 +165,7 @@ export function Drawer({
                     className={SELECT_CLS}
                   >
                     <option value="">default{defaults ? ` (${defaults.model})` : ''}</option>
-                    {MODEL_OPTIONS[task.provider].map((m) => (
+                    {modelOptionsFor(task.provider).map((m) => (
                       <option key={m} value={m}>
                         {m}
                       </option>

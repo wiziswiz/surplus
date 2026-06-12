@@ -62,9 +62,10 @@ page. It should export the currently filtered rows with correct headers."*
 
 ### 4 · Arm the schedule
 
-```sh
-surplus install
-```
+Click the **Arm schedule** button in the board header (it turns into a green
+**⏻ Armed**). That's the master switch — no terminal needed. (CLI equivalent:
+`surplus install`. The **Pause** button next to it is the temporary brake;
+both also live in the menu-bar app's dropdown.)
 
 Done. surplus now checks your usage every 15 minutes and does **nothing**
 until the final hours before your weekly reset — the window where unused
@@ -100,11 +101,17 @@ but still respects pacing and the kill switch.
 ## The menu-bar app
 
 surplus lives best in your menu bar: a live gauge (`◔ 62%` weekly, `🔥` while
-burning, `⏸` when paused) with a dropdown showing per-provider windows, the
-current decision, and one-click **Burn now / Pause / Open Board** — plus
-native notifications when a run starts, a judge scores, or a task gets
-blocked. It's a ~7MB pure-Rust Tauri shell; the launchd services stay in
-charge, the app is just a window onto them.
+burning, `⏸` when paused, hollow `◌` when not yet armed) with a dropdown
+showing one line per account, the current decision, and one-click
+**Open Board / Settings… / Burn now / Pause / Arm schedule** — plus native
+notifications when a run starts, a judge scores, or a task gets blocked.
+It's a ~7MB pure-Rust Tauri shell; the launchd services stay in charge, the
+app is just a window onto them.
+
+All configuration lives in one place: the board's **Settings panel** (gear
+icon in the board header, or **Settings…** straight from the menu-bar
+dropdown). Burn modes, reserves, accounts, models — there is no separate
+config UI to learn, and no config that requires the terminal.
 
 ```sh
 # one-time: Rust toolchain (brew install rust), then
@@ -216,10 +223,39 @@ probing details. When live usage isn't discoverable, set
 timestamp, or `'Thu 21:00'`-style weekday + time); surplus extrapolates the
 7-day window from it and burns time-gated, treating utilization as unknown.
 
-Projects and tasks carry a provider affinity — `claude`, `codex`, or `any`
-(the default). When a burn window opens for a provider, the dispatcher only
-claims tasks whose affinity matches. `any` tasks go to whichever provider is
-burning, so a single backlog drains both subscriptions.
+Projects and tasks carry a provider affinity — `claude`, `codex`, a specific
+claude account (`claude:work`), or `any` (the default). When a burn window
+opens for an account, the dispatcher only claims tasks whose affinity
+matches. `any` tasks go to whichever account is burning, so a single backlog
+drains every subscription you have.
+
+## Multiple Claude accounts
+
+Have a personal **and** a work Claude subscription? surplus burns the
+surplus of both — each account gets its own gauges, its own burn window,
+and its own protected reserve.
+
+<img src="docs/accounts.png" alt="Settings → Claude accounts: account list with usage indicator and priority, plus the add-account form" width="700">
+
+Adding one takes a minute, and **no tokens are ever pasted or stored**:
+
+1. **Settings → Claude accounts → Add account** — pick a short id (`work`)
+   and a label.
+2. Run the one-liner it shows you in Terminal —
+   `CLAUDE_CONFIG_DIR=~/.surplus/profiles/work claude` — and log in once
+   with that account. That's a standard Claude Code profile folder: Claude
+   Code keeps the login refreshed itself, forever.
+3. Back in Settings, the account shows **usage ok** — done.
+
+**Which account burns first?** Auto mode by default: among accounts whose
+burn window is open, surplus picks the one whose weekly reset is soonest
+(its quota expires first), tie-broken by most surplus remaining. Prefer one
+account manually? Give it a lower **Priority** number and it always goes
+first. Either way, windows and reserves still gate every account
+independently — priority never overrides safety.
+
+Pin work to an account with the `claude:work` affinity on a task or project,
+or leave everything on `any` and let auto mode spread the burn.
 
 ## The usage-endpoint gotcha
 
@@ -344,7 +380,13 @@ example (strip comments; the real file is plain JSON):
       "defaults": {
         "model": "opus",            // opus | sonnet | haiku
         "effort": "high"            // low | medium | high | xhigh | max
-      }
+      },
+      // Optional: extra subscriptions, each a Claude Code profile dir
+      // (managed from Settings → Claude accounts; max 6, no tokens stored).
+      "accounts": [
+        { "id": "main", "label": "personal", "configDir": null, "priority": null },
+        { "id": "work", "label": "Work Max", "configDir": "~/.surplus/profiles/work", "priority": null }
+      ]
     },
     "codex": {
       "enabled": false,             // opt in to burning ChatGPT quota

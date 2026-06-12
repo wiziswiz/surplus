@@ -20,12 +20,13 @@ import { randomBytes } from 'node:crypto';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type {
+  AccountAdapter,
   ApiState,
+  ClaudeAccountConfig,
   DecideInput,
   Decision,
   ProjectRow,
   Provider,
-  ProviderAdapter,
   ProviderPref,
   SurplusConfig,
   TaskEventRow,
@@ -35,6 +36,7 @@ import type {
   TaskStatus,
   UsageSnapshot,
 } from './types.js';
+import { defaultClaudeDir, expandTilde, MAX_CLAUDE_ACCOUNTS, resolveAccounts } from './config.js';
 import { discoverRepos } from './discover.js';
 
 // ---------------------------------------------------------------------------
@@ -70,8 +72,11 @@ export interface ServerDeps {
   draftVision?: (project: ProjectRow) => Promise<unknown>;
   /** Create a brand-new project (dir + git init + VISION.md); returns the row. */
   scaffoldProject?: (name: string) => Promise<ProjectRow>;
-  /** Manual one-shot dispatch (ignores windows, respects pacing). */
-  triggerBurn?: (taskId?: string, provider?: Provider) => Promise<unknown>;
+  /**
+   * Manual one-shot dispatch (ignores windows, respects pacing). `provider`
+   * accepts a provider name or an AccountKey ('claude:<id>').
+   */
+  triggerBurn?: (taskId?: string, provider?: string) => Promise<unknown>;
   /**
    * Persist a validated config patch (deep-merge over the loaded config and
    * save); returns the new effective config. Injected by cli.ts using
@@ -103,7 +108,8 @@ export interface StartServerOptions {
   port: number;
   db: ServerDb;
   config: SurplusConfig;
-  adapters: Partial<Record<Provider, ProviderAdapter>>;
+  /** Burnable accounts (one AccountAdapter per claude account + codex). */
+  accounts: AccountAdapter[];
   decideFn: (input: DecideInput) => Decision;
   paused: () => boolean;
   setPaused: (b: boolean) => void;
@@ -119,6 +125,10 @@ export interface StartServerOptions {
 const ID_RE = /^[a-z0-9_-]+$/i;
 const PROVIDERS: readonly Provider[] = ['claude', 'codex'];
 const PROVIDER_PREFS: readonly ProviderPref[] = ['claude', 'codex', 'any'];
+/** Account id slug ('main' reserved for the default claude account). */
+const ACCOUNT_ID_RE = /^[a-z0-9-]{1,24}$/;
+/** Non-main claude account affinity: 'claude:<id>'. */
+const CLAUDE_ACCOUNT_KEY_RE = /^claude:[a-z0-9-]{1,24}$/;
 const TASK_STATUSES: readonly TaskStatus[] = [
   'triage', 'todo', 'ready', 'running', 'blocked', 'done', 'archived',
 ];
@@ -131,8 +141,12 @@ function isProvider(v: unknown): v is Provider {
   return typeof v === 'string' && (PROVIDERS as readonly string[]).includes(v);
 }
 
+/** Affinity grammar: claude | codex | any | claude:<id>. */
 function isProviderPref(v: unknown): v is ProviderPref {
-  return typeof v === 'string' && (PROVIDER_PREFS as readonly string[]).includes(v);
+  return (
+    typeof v === 'string' &&
+    ((PROVIDER_PREFS as readonly string[]).includes(v) || CLAUDE_ACCOUNT_KEY_RE.test(v))
+  );
 }
 
 function isTaskStatus(v: unknown): v is TaskStatus {
@@ -282,6 +296,8 @@ export interface ConfigPatch {
         enabled?: boolean;
         defaults?: { model?: string; effort?: string };
         weeklyResetFallback?: string | null;
+        /** claude only (rejected for codex). Whole-array replace, max 6. */
+        accounts?: ClaudeAccountConfig[];
       }
     >
   >;
@@ -340,10 +356,84 @@ const wantStrArray: FieldCheck = (v, p) =>
     ? null
     : `${p} must be an array of up to 20 non-empty strings`;
 
+/**
+ * providers.claude.accounts — whole-array replace. Each entry is one
+ * ClaudeAccountConfig: id slug 1–24 lowercase [a-z0-9-] (unique; 'main' is the
+ * default account and must keep configDir null), label non-empty ≤40 chars,
+ * configDir an absolute-or-~ path string (null only for main), priority an
+ * integer 0–99 or null (auto). Missing configDir/priority read as null.
+ * configDir values must also be INDEPENDENT credential sources: a non-main
+ * dir resolving to the default ~/.claude (that is the main account — its
+ * derived keychain service is main's), or two entries resolving to the same
+ * dir, would enumerate one subscription as several 'independent' accounts
+ * (multiplied claim slots within the usage-cache window) — rejected.
+ */
+const wantClaudeAccounts: FieldCheck = (v, p) => {
+  if (!Array.isArray(v)) return `${p} must be an array of accounts`;
+  if (v.length > MAX_CLAUDE_ACCOUNTS) {
+    return `${p} must contain at most ${MAX_CLAUDE_ACCOUNTS} accounts`;
+  }
+  const seen = new Set<string>();
+  const seenDirs = new Set<string>();
+  const defaultDir = defaultClaudeDir();
+  for (let i = 0; i < v.length; i++) {
+    const entry: unknown = v[i];
+    const ep = `${p}[${i}]`;
+    if (!isPlainObject(entry)) return `${ep} must be an object`;
+    for (const key of Object.keys(entry)) {
+      if (!['id', 'label', 'configDir', 'priority'].includes(key)) {
+        return `unknown account key '${ep}.${key}'`;
+      }
+    }
+    const { id, label } = entry;
+    if (typeof id !== 'string' || !ACCOUNT_ID_RE.test(id)) {
+      return `${ep}.id must be a slug of 1–24 lowercase [a-z0-9-] characters`;
+    }
+    if (seen.has(id)) return `${ep}.id duplicates account id '${id}'`;
+    seen.add(id);
+    if (typeof label !== 'string' || label.trim().length === 0 || label.trim().length > 40) {
+      return `${ep}.label must be a non-empty string of at most 40 characters`;
+    }
+    const configDir = entry.configDir ?? null;
+    if (id === 'main') {
+      if (configDir !== null) return `${ep}.configDir must be null for the main account`;
+    } else {
+      if (
+        typeof configDir !== 'string' ||
+        !(configDir === '~' || configDir.startsWith('~/') || path.isAbsolute(configDir))
+      ) {
+        return `${ep}.configDir must be an absolute or ~-prefixed path`;
+      }
+      const resolvedDir = path.resolve(expandTilde(configDir));
+      if (resolvedDir === defaultDir) {
+        return `${ep}.configDir resolves to the default ~/.claude — that is the main account`;
+      }
+      if (seenDirs.has(resolvedDir)) {
+        return `${ep}.configDir duplicates another account's profile dir`;
+      }
+      seenDirs.add(resolvedDir);
+    }
+    const priority = entry.priority ?? null;
+    if (
+      priority !== null &&
+      !(Number.isInteger(priority) && (priority as number) >= 0 && (priority as number) <= 99)
+    ) {
+      return `${ep}.priority must be an integer 0–99 or null`;
+    }
+  }
+  return null;
+};
+
 const PROVIDER_SPEC: SpecNode = {
   enabled: wantBool,
   defaults: { model: wantStr, effort: wantStr },
   weeklyResetFallback: wantResetFallback,
+};
+
+/** claude additionally accepts the multi-account list. */
+const CLAUDE_PROVIDER_SPEC: SpecNode = {
+  ...PROVIDER_SPEC,
+  accounts: wantClaudeAccounts,
 };
 
 const CONFIG_SPEC: SpecNode = {
@@ -402,7 +492,11 @@ export function buildConfigPatch(
         if (!isProvider(prov)) {
           return { ok: false, error: `unknown provider '${prov}' (claude|codex)` };
         }
-        const r = walkSpec(pv, PROVIDER_SPEC, `providers.${prov}`);
+        const r = walkSpec(
+          pv,
+          prov === 'claude' ? CLAUDE_PROVIDER_SPEC : PROVIDER_SPEC,
+          `providers.${prov}`,
+        );
         if (!r.ok) return r;
         provs[prov] = r.value;
       }
@@ -442,8 +536,22 @@ export function applyConfigPatch(base: SurplusConfig, patch: ConfigPatch): Surpl
 // ---------------------------------------------------------------------------
 
 export async function startServer(opts: StartServerOptions): Promise<void> {
-  const { db, config, adapters, decideFn, paused, setPaused, deps } = opts;
+  const { db, config, accounts, decideFn, paused, setPaused, deps } = opts;
   const app = new Hono();
+
+  /**
+   * Error text when a 'claude:<id>' affinity names no configured account
+   * (checked against both the live adapters and the possibly-PATCHed-since-
+   * boot config), else null. A task/project pinned to an unknown key would
+   * sit in 'ready' forever — claimNextReadyTask's predicate never matches it
+   * and nothing warns — so it is rejected at the door.
+   */
+  function unknownAccountPrefError(pref: unknown): string | null {
+    if (typeof pref !== 'string' || !CLAUDE_ACCOUNT_KEY_RE.test(pref)) return null;
+    const known =
+      accounts.some((a) => a.key === pref) || resolveAccounts(config).some((a) => a.key === pref);
+    return known ? null : `unknown claude account '${pref}' — not in providers.claude.accounts`;
+  }
 
   // --- shared state builders ------------------------------------------------
 
@@ -452,20 +560,19 @@ export async function startServer(opts: StartServerOptions): Promise<void> {
     const decisions: ApiState['decisions'] = {};
     const now = Date.now();
     const isPaused = paused();
-    for (const prov of PROVIDERS) {
-      const adapter = adapters[prov];
-      if (!adapter) continue;
+    for (const account of accounts) {
       let snap: UsageSnapshot | null = null;
       try {
-        // Adapter caches internally; fresh narrows the cache window to a 30s
-        // floor (never overrides 429 backoff) for the board's refresh button.
-        snap = await adapter.getUsage(opts?.fresh ? { fresh: true } : undefined);
+        // Adapter caches internally (per account); fresh narrows the cache
+        // window to a 30s floor (never overrides 429 backoff) for the board's
+        // refresh button.
+        snap = await account.getUsage(opts?.fresh ? { fresh: true } : undefined);
       } catch {
         snap = null;
       }
-      usage[prov] = snap;
+      usage[account.key] = snap;
       const effective: UsageSnapshot = snap ?? {
-        provider: prov,
+        provider: account.provider,
         planName: null,
         fiveHourPct: null,
         sevenDayPct: null,
@@ -476,9 +583,9 @@ export async function startServer(opts: StartServerOptions): Promise<void> {
         fetchedAt: now,
       };
       try {
-        decisions[prov] = decideFn({ usage: effective, config, now, paused: isPaused });
+        decisions[account.key] = decideFn({ usage: effective, config, now, paused: isPaused });
       } catch (e) {
-        decisions[prov] = { action: 'stop', reason: `decision error: ${errMsg(e)}` };
+        decisions[account.key] = { action: 'stop', reason: `decision error: ${errMsg(e)}` };
       }
     }
     let armed = false;
@@ -490,6 +597,12 @@ export async function startServer(opts: StartServerOptions): Promise<void> {
     return {
       usage,
       decisions,
+      accounts: accounts.map((a) => ({
+        key: a.key,
+        provider: a.provider,
+        label: a.label,
+        priority: a.priority,
+      })),
       paused: isPaused,
       armed,
       config,
@@ -627,6 +740,8 @@ export async function startServer(opts: StartServerOptions): Promise<void> {
     if (!body) return c.json({ error: 'invalid JSON body' }, 400);
     const built = buildProjectPatch(body);
     if (!built.ok) return c.json({ error: built.error }, 400);
+    const unknownPref = unknownAccountPrefError(built.patch.provider);
+    if (unknownPref) return c.json({ error: unknownPref }, 400);
     const updated = db.updateProject(id, built.patch) ?? db.getProject(id);
     if (!updated) return c.json({ error: 'project not found' }, 404);
     return c.json(updated);
@@ -676,6 +791,8 @@ export async function startServer(opts: StartServerOptions): Promise<void> {
     if ('parentId' in body && body.parentId !== null && !validId(body.parentId)) {
       return c.json({ error: 'invalid parentId' }, 400);
     }
+    const unknownPref = unknownAccountPrefError(body.provider);
+    if (unknownPref) return c.json({ error: unknownPref }, 400);
     const now = Date.now();
     const task: TaskRow = {
       id: genTaskId(),
@@ -724,6 +841,8 @@ export async function startServer(opts: StartServerOptions): Promise<void> {
     if (!body) return c.json({ error: 'invalid JSON body' }, 400);
     const built = buildTaskPatch(body);
     if (!built.ok) return c.json({ error: built.error }, 400);
+    const unknownPref = unknownAccountPrefError(built.patch.provider);
+    if (unknownPref) return c.json({ error: unknownPref }, 400);
     const patch = { ...built.patch, updatedAt: Date.now() };
     const updated = db.updateTask(id, patch) ?? db.getTask(id);
     if (!updated) return c.json({ error: 'task not found' }, 404);
@@ -805,10 +924,25 @@ export async function startServer(opts: StartServerOptions): Promise<void> {
       if (!validId(body.taskId)) return c.json({ error: 'invalid taskId' }, 400);
       taskId = body.taskId;
     }
-    let provider: Provider | undefined;
+    // `provider` accepts a plain provider name (any account of that provider,
+    // AUTO burn order) or an AccountKey ('claude:<id>') matching a configured
+    // account — checked against both the live adapters and the (possibly
+    // PATCHed-since-boot) config.
+    let provider: string | undefined;
     if (body.provider !== undefined && body.provider !== null) {
-      if (!isProvider(body.provider)) return c.json({ error: 'invalid provider' }, 400);
-      provider = body.provider;
+      const v = body.provider;
+      const known =
+        typeof v === 'string' &&
+        (isProvider(v) ||
+          accounts.some((a) => a.key === v) ||
+          resolveAccounts(config).some((a) => a.key === v));
+      if (!known) {
+        return c.json(
+          { error: 'invalid provider — expected claude|codex or a configured account key' },
+          400,
+        );
+      }
+      provider = v;
     }
     try {
       const result = await deps.triggerBurn(taskId, provider);
@@ -835,6 +969,32 @@ export async function startServer(opts: StartServerOptions): Promise<void> {
     // Mutate the shared config object so /api/state and decide() see the new
     // values immediately (cli passes the same reference to the dispatcher).
     Object.assign(config, effective);
+    // Account removal: a task/project pinned to a 'claude:<id>' key that no
+    // longer exists would starve silently in 'ready' (the claim predicate
+    // never matches it). Rewrite stale affinities to the 'claude' provider
+    // and record an event so the change is visible on the board.
+    if (built.patch.providers?.claude?.accounts) {
+      const knownKeys = new Set(resolveAccounts(effective).map((a) => a.key));
+      for (const t of db.listTasks()) {
+        if (CLAUDE_ACCOUNT_KEY_RE.test(t.provider) && !knownKeys.has(t.provider)) {
+          db.updateTask(t.id, { provider: 'claude', updatedAt: Date.now() });
+          db.appendEvent('task-updated', t.id, {
+            fields: ['provider'],
+            reason: `account '${t.provider}' removed — affinity reset to claude`,
+          });
+        }
+      }
+      for (const p of db.listProjects()) {
+        if (CLAUDE_ACCOUNT_KEY_RE.test(p.provider) && !knownKeys.has(p.provider)) {
+          db.updateProject(p.id, { provider: 'claude' });
+          db.appendEvent('task-updated', null, {
+            fields: ['provider'],
+            projectId: p.id,
+            reason: `account '${p.provider}' removed — project affinity reset to claude`,
+          });
+        }
+      }
+    }
     return c.json(effective);
   });
 

@@ -9,7 +9,7 @@
 
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import {
   CONFIG_FILE,
   DB_FILE,
@@ -17,6 +17,8 @@ import {
   PAUSED_FILE,
   SURPLUS_DIR_NAME,
   WORKTREES_DIR,
+  type ClaudeAccountConfig,
+  type Provider,
   type SurplusConfig,
 } from './types.js';
 
@@ -59,6 +61,162 @@ export function ensureDirs(dir?: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Accounts — single source of truth for enumeration + AccountKey construction
+// ---------------------------------------------------------------------------
+
+/** Account id slug: 'main' is reserved for the default account. */
+const ACCOUNT_ID_RE = /^[a-z0-9-]{1,24}$/;
+
+/** Hard cap on configured claude accounts. */
+export const MAX_CLAUDE_ACCOUNTS = 6;
+
+/** The implicit single-account default for providers.claude.accounts. */
+export function defaultClaudeAccounts(): ClaudeAccountConfig[] {
+  return [{ id: 'main', label: 'personal', configDir: null, priority: null }];
+}
+
+/** One enumerated burnable account (config-level, not yet bound to a runner). */
+export interface ResolvedAccount {
+  /** AccountKey: 'claude' (BACK-COMPAT for id 'main') | 'claude:<id>' | 'codex'. */
+  key: string;
+  provider: Provider;
+  id: string;
+  label: string;
+  /**
+   * Absolute Claude Code profile dir ('~' expanded); null = the default
+   * env-honoring flow ($CLAUDE_CONFIG_DIR / ~/.claude). With more than one
+   * claude account configured, main is pinned to the explicit ~/.claude
+   * (never null) so the environment cannot alias it to another account.
+   */
+  configDir: string | null;
+  /** Manual burn order (lower = preferred); null = auto. */
+  priority: number | null;
+}
+
+/** Expand a leading '~' to the home directory. */
+export function expandTilde(p: string): string {
+  if (p === '~') return homedir();
+  if (p.startsWith('~/')) return join(homedir(), p.slice(2));
+  return p;
+}
+
+/** Resolved default Claude Code profile dir (~/.claude). */
+export function defaultClaudeDir(): string {
+  return resolve(join(homedir(), '.claude'));
+}
+
+/**
+ * Enumerate every burnable account for the enabled providers — the single
+ * source of truth for account enumeration and key construction:
+ *   - claude (when enabled): config.providers.claude.accounts, defaulting to
+ *     the single 'main' account. id 'main' maps to key 'claude' (back-compat
+ *     with pre-account db rows/affinities); every other id maps to
+ *     'claude:<id>'. Entries with invalid ids ([a-z0-9-]{1,24}) or duplicate
+ *     ids are skipped; at most MAX_CLAUDE_ACCOUNTS survive. configDir is
+ *     '~'-expanded and resolved to an absolute path (null = default).
+ *     Hand-edited configs get the same independence guarantees the PATCH
+ *     validator enforces: a non-main entry with a missing/empty configDir or
+ *     one resolving to the default ~/.claude is skipped (it would silently
+ *     re-enumerate the main subscription under a second key), and any entry
+ *     whose resolved dir duplicates an earlier account's dir is skipped (one
+ *     credential source = one account). When more than one claude account
+ *     survives, main's null configDir is pinned to the explicit ~/.claude so
+ *     a stray process-level CLAUDE_CONFIG_DIR (e.g. exported after a profile
+ *     login) can never alias the 'claude' key to a non-main account.
+ *   - codex (when enabled): the single 'codex' account.
+ * Tolerates configs written before the accounts feature (key absent → main).
+ */
+export function resolveAccounts(config: SurplusConfig): ResolvedAccount[] {
+  const out: ResolvedAccount[] = [];
+
+  if (config.providers.claude.enabled) {
+    const declared = config.providers.claude.accounts;
+    const accounts = Array.isArray(declared) && declared.length > 0 ? declared : defaultClaudeAccounts();
+    const defaultDir = defaultClaudeDir();
+    const seenIds = new Set<string>();
+    const seenDirs = new Set<string>();
+    for (const account of accounts) {
+      if (out.length >= MAX_CLAUDE_ACCOUNTS) break;
+      const id = typeof account?.id === 'string' ? account.id : '';
+      if (!ACCOUNT_ID_RE.test(id) || seenIds.has(id)) continue;
+      const rawDir = typeof account.configDir === 'string' ? account.configDir.trim() : '';
+      const configDir = rawDir === '' ? null : resolve(expandTilde(rawDir));
+      // Non-main entries must name their OWN profile dir: a missing configDir
+      // or one resolving to ~/.claude is the main subscription again — keeping
+      // it would burn one login under two keys (double pacing/claims).
+      if (id !== 'main' && (configDir === null || configDir === defaultDir)) continue;
+      // One credential source = one account: skip entries whose resolved dir
+      // duplicates an earlier account's (main's null counts as ~/.claude).
+      const dirKey = configDir ?? defaultDir;
+      if (seenDirs.has(dirKey)) continue;
+      seenIds.add(id);
+      seenDirs.add(dirKey);
+      out.push({
+        key: id === 'main' ? 'claude' : `claude:${id}`,
+        provider: 'claude',
+        id,
+        label:
+          typeof account.label === 'string' && account.label.trim() !== '' ? account.label.trim() : id,
+        configDir,
+        priority:
+          typeof account.priority === 'number' && Number.isFinite(account.priority)
+            ? account.priority
+            : null,
+      });
+    }
+    // Multi-account: pin main's default (null) configDir to the explicit
+    // ~/.claude. Otherwise main resolves through the legacy env-honoring flow
+    // ($CLAUDE_CONFIG_DIR), and a profile-login export leaking into the
+    // environment that starts surplus would make the 'claude' key read and
+    // burn a non-main account's subscription while the real ~/.claude login
+    // is never gated at all. Pinning flows everywhere: credentials (keychain
+    // service + .credentials.json), the per-account usage cache, and the
+    // spawned worker's CLAUDE_CONFIG_DIR override.
+    if (out.length > 1) {
+      for (const acct of out) {
+        if (acct.id === 'main' && acct.configDir === null) acct.configDir = defaultDir;
+      }
+    }
+    if (out.length === 0) {
+      // Every declared entry was invalid — never lose the main account.
+      out.push({
+        key: 'claude',
+        provider: 'claude',
+        id: 'main',
+        label: 'personal',
+        configDir: null,
+        priority: null,
+      });
+    }
+  }
+
+  if (config.providers.codex.enabled) {
+    out.push({
+      key: 'codex',
+      provider: 'codex',
+      id: 'codex',
+      label: 'codex',
+      configDir: null,
+      priority: null,
+    });
+  }
+
+  return out;
+}
+
+/**
+ * Sanitize an AccountKey for use in filenames (logs, usage caches):
+ * lowercased, [a-z0-9-] only ('claude:work' → 'claude-work').
+ */
+export function sanitizeAccountKey(key: string): string {
+  const slug = key
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return slug === '' ? 'account' : slug;
+}
+
+// ---------------------------------------------------------------------------
 // Defaults
 // ---------------------------------------------------------------------------
 
@@ -69,6 +227,7 @@ export function defaultConfig(): SurplusConfig {
       claude: {
         enabled: true,
         defaults: { model: 'opus', effort: 'high' },
+        accounts: defaultClaudeAccounts(),
       },
       codex: {
         enabled: false,

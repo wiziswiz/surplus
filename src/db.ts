@@ -135,25 +135,34 @@ export interface SurplusDb {
   listTasks(filter?: TaskFilter): TaskRow[];
 
   /**
-   * Atomically claim the next dispatchable 'ready' task for `provider`:
-   * lowest priority number first, then oldest. Excludes tasks whose provider
-   * doesn't match (task 'any' matches all), tasks scheduled in the future,
-   * tasks whose parent isn't done, and any task in a project that already has
-   * a 'running' task. Sets status='running' and increments attempts in one
-   * BEGIN IMMEDIATE transaction (concurrent processes wait on the busy
-   * timeout instead of throwing SQLITE_BUSY_SNAPSHOT). When `maxConcurrent`
-   * is given, the claim also refuses atomically once that many tasks are
-   * 'running' globally. Returns the updated row or null.
+   * Atomically claim the next dispatchable 'ready' task for an account:
+   * lowest priority number first, then oldest. A task's affinity matches when
+   * it is 'any', the account's provider name, or the account's key
+   * ('claude:<id>'); `accountKey` defaults to `provider` (the pre-account
+   * back-compat: the main claude account's key IS 'claude'). Excludes tasks
+   * scheduled in the future, tasks whose parent isn't done, and any task in a
+   * project that already has a 'running' task. Sets status='running' and
+   * increments attempts in one BEGIN IMMEDIATE transaction (concurrent
+   * processes wait on the busy timeout instead of throwing
+   * SQLITE_BUSY_SNAPSHOT). When `maxConcurrent` is given, the claim also
+   * refuses atomically once that many tasks are 'running' globally. Returns
+   * the updated row or null.
    */
-  claimNextReadyTask(now: number, provider: Provider, maxConcurrent?: number): TaskRow | null;
+  claimNextReadyTask(
+    now: number,
+    provider: Provider,
+    maxConcurrent?: number,
+    accountKey?: string,
+  ): TaskRow | null;
 
   /**
    * Atomically claim a SPECIFIC task for a manual one-shot burn: a single
-   * status-guarded UPDATE (status='ready' + provider-compatible), so a
-   * concurrent tick in another process can never double-claim it. Returns
-   * the updated row, or null when the guard failed.
+   * status-guarded UPDATE (status='ready' + affinity-compatible with the
+   * provider/accountKey pair), so a concurrent tick in another process can
+   * never double-claim it. Returns the updated row, or null when the guard
+   * failed.
    */
-  claimTaskById(id: string, now: number, provider: Provider): TaskRow | null;
+  claimTaskById(id: string, now: number, provider: Provider, accountKey?: string): TaskRow | null;
 
   createRun(input: CreateRunInput): TaskRunRow;
   updateRun(id: string, patch: RunPatch): TaskRunRow;
@@ -498,7 +507,7 @@ export function openDb(dbFilePath?: string): SurplusDb {
   const selectClaimable = db.prepare(
     `SELECT id FROM tasks t
      WHERE t.status = 'ready'
-       AND (t.provider = @provider OR t.provider = 'any')
+       AND (t.provider = @provider OR t.provider = @accountKey OR t.provider = 'any')
        AND (t.scheduled_at IS NULL OR t.scheduled_at <= @now)
        AND (t.parent_id IS NULL
             OR EXISTS (SELECT 1 FROM tasks p WHERE p.id = t.parent_id AND p.status = 'done'))
@@ -516,7 +525,8 @@ export function openDb(dbFilePath?: string): SurplusDb {
   // claim is atomic across processes (no read-then-write window).
   const updateClaimById = db.prepare(
     `UPDATE tasks SET status = 'running', attempts = attempts + 1, updated_at = @now
-     WHERE id = @id AND status = 'ready' AND (provider = @provider OR provider = 'any')`,
+     WHERE id = @id AND status = 'ready'
+       AND (provider = @provider OR provider = @accountKey OR provider = 'any')`,
   );
 
   const countRunningStmt = db.prepare(
@@ -620,8 +630,13 @@ export function openDb(dbFilePath?: string): SurplusDb {
   // waits on the busy timeout instead of throwing SQLITE_BUSY_SNAPSHOT on
   // the read→write upgrade (which would abort the whole tick).
   const claimTx = db.transaction(
-    (nowMs: number, provider: Provider, maxConcurrent: number | null): string | null => {
-      const row = selectClaimable.get({ provider, now: nowMs, maxConcurrent }) as
+    (
+      nowMs: number,
+      provider: Provider,
+      maxConcurrent: number | null,
+      accountKey: string,
+    ): string | null => {
+      const row = selectClaimable.get({ provider, accountKey, now: nowMs, maxConcurrent }) as
         | { id: string }
         | undefined;
       if (!row) return null;
@@ -630,23 +645,27 @@ export function openDb(dbFilePath?: string): SurplusDb {
         from: 'ready',
         to: 'running',
         provider,
+        account: accountKey,
         via: 'claim',
       });
       return row.id;
     },
   );
 
-  const claimByIdTx = db.transaction((id: string, nowMs: number, provider: Provider): boolean => {
-    const info = updateClaimById.run({ id, now: nowMs, provider });
-    if (info.changes !== 1) return false;
-    appendEvent('status-changed', id, {
-      from: 'ready',
-      to: 'running',
-      provider,
-      via: 'forced-claim',
-    });
-    return true;
-  });
+  const claimByIdTx = db.transaction(
+    (id: string, nowMs: number, provider: Provider, accountKey: string): boolean => {
+      const info = updateClaimById.run({ id, now: nowMs, provider, accountKey });
+      if (info.changes !== 1) return false;
+      appendEvent('status-changed', id, {
+        from: 'ready',
+        to: 'running',
+        provider,
+        account: accountKey,
+        via: 'forced-claim',
+      });
+      return true;
+    },
+  );
 
   // -- public API -----------------------------------------------------------------
 
@@ -747,13 +766,18 @@ export function openDb(dbFilePath?: string): SurplusDb {
       return (db.prepare(sql).all(...values) as TaskDbRow[]).map(mapTask);
     },
 
-    claimNextReadyTask(now: number, provider: Provider, maxConcurrent?: number): TaskRow | null {
-      const id = claimTx.immediate(now, provider, maxConcurrent ?? null);
+    claimNextReadyTask(
+      now: number,
+      provider: Provider,
+      maxConcurrent?: number,
+      accountKey?: string,
+    ): TaskRow | null {
+      const id = claimTx.immediate(now, provider, maxConcurrent ?? null, accountKey ?? provider);
       return id === null || id === undefined ? null : getTask(id);
     },
 
-    claimTaskById(id: string, now: number, provider: Provider): TaskRow | null {
-      return claimByIdTx.immediate(id, now, provider) ? getTask(id) : null;
+    claimTaskById(id: string, now: number, provider: Provider, accountKey?: string): TaskRow | null {
+      return claimByIdTx.immediate(id, now, provider, accountKey ?? provider) ? getTask(id) : null;
     },
 
     createRun(input: CreateRunInput): TaskRunRow {

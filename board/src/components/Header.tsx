@@ -1,7 +1,19 @@
 import { useRef, useState } from 'react';
-import type { DecisionDto, ProjectDto, Provider, StateDto, TaskDto, UsageDto } from '../types';
+import type {
+  AccountInfoDto,
+  DecisionDto,
+  ProjectDto,
+  StateDto,
+  TaskDto,
+  UsageDto,
+} from '../types';
 import { fmtCountdown, fmtRel } from '../lib';
 import { useNow } from '../useNow';
+
+/** Placeholder while /api/state is still loading (claude is enabled by default). */
+const LOADING_ACCOUNTS: AccountInfoDto[] = [
+  { key: 'claude', provider: 'claude', label: 'personal', priority: null },
+];
 
 export type RefreshState = 'idle' | 'busy' | 'cooldown';
 
@@ -30,11 +42,11 @@ export function Header({
 }) {
   const paused = state?.paused ?? false;
   const armed = state?.armed ?? false;
-  // ApiState contract: a provider's usage key is ABSENT when it is disabled —
-  // omit its panel instead of rendering empty gauges. (claude defaults to
-  // shown while state is still loading, since it is enabled by default.)
-  const showClaude = state ? 'claude' in state.usage : true;
-  const showCodex = state ? 'codex' in state.usage : false;
+  // ApiState contract: accounts[] lists every burnable account of the ENABLED
+  // providers — one panel each, keyed by AccountKey into usage/decisions.
+  // Panels wrap when more than two accounts are configured.
+  const accounts = state?.accounts ?? LOADING_ACCOUNTS;
+  const claudeCount = accounts.filter((a) => a.provider === 'claude').length;
   return (
     <header className="shrink-0 border-b border-line bg-raised shadow-sm">
       <div className="flex flex-wrap items-stretch gap-x-8 gap-y-4 px-6 py-4">
@@ -85,24 +97,19 @@ export function Header({
             </button>
           </div>
         </div>
-        {showClaude && (
+        {accounts.map((account) => (
           <ProviderPanel
-            provider="claude"
-            usage={state?.usage.claude ?? null}
-            decision={state?.decisions.claude}
+            key={account.key}
+            account={account}
+            // Show the account label only when claude has siblings — a lone
+            // main account reads exactly as it did pre-multi-account.
+            showLabel={account.provider === 'claude' && claudeCount > 1}
+            usage={state?.usage[account.key] ?? null}
+            decision={state?.decisions[account.key]}
             onRefreshUsage={onRefreshUsage}
             refreshState={refreshState}
           />
-        )}
-        {showCodex && (
-          <ProviderPanel
-            provider="codex"
-            usage={state?.usage.codex ?? null}
-            decision={state?.decisions.codex}
-            onRefreshUsage={onRefreshUsage}
-            refreshState={refreshState}
-          />
-        )}
+        ))}
       </div>
     </header>
   );
@@ -225,25 +232,31 @@ function GearIcon() {
 
 /** claude = amber accent, codex = teal — identical structure, tint differs. */
 function ProviderPanel({
-  provider,
+  account,
+  showLabel,
   usage,
   decision,
   onRefreshUsage,
   refreshState,
 }: {
-  provider: Provider;
+  account: AccountInfoDto;
+  /** Render the 'claude · work' label chip (multi-account setups only). */
+  showLabel: boolean;
   usage: UsageDto | null;
   decision?: DecisionDto;
   onRefreshUsage: () => void;
   refreshState: RefreshState;
 }) {
   const now = useNow(1000);
-  const accent = provider === 'claude' ? 'text-ember' : 'text-jade';
+  const accent = account.provider === 'claude' ? 'text-ember' : 'text-jade';
   return (
     <div className="flex min-w-96 max-w-xl flex-1 flex-col justify-center gap-2">
       <div className="flex min-w-0 items-center gap-2">
         <span className={`text-xs font-semibold uppercase tracking-[0.15em] ${accent}`}>
-          {provider}
+          {account.provider}
+          {showLabel && (
+            <span className="normal-case tracking-normal text-dim"> · {account.label}</span>
+          )}
         </span>
         {usage?.planName && (
           <span className="rounded-chip bg-overlay px-1.5 py-0.5 text-[10px] font-medium text-dim">

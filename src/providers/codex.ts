@@ -46,6 +46,7 @@ import {
 } from '../runner.js';
 import { buildGoalCondition, redactSecrets } from '../vision.js';
 import type {
+  AccountAdapter,
   ProviderAdapter,
   RunnerResult,
   RunOutcome,
@@ -565,4 +566,24 @@ export function codexAdapter(config: SurplusConfig, deps: CodexAdapterDeps = {})
   }
 
   return { provider: 'codex', getUsage, runTask };
+}
+
+/**
+ * The codex AccountAdapter — codex is always a single account with key
+ * 'codex' (no profile-dir multiplexing; the codex CLI owns its own auth).
+ */
+export function codexAccountAdapter(config: SurplusConfig, deps: CodexAdapterDeps = {}): AccountAdapter {
+  const base = codexAdapter(config, deps);
+  return {
+    key: 'codex',
+    provider: 'codex',
+    label: 'codex',
+    priority: null,
+    configDir: null,
+    getUsage: (opts?: { fresh?: boolean }) => {
+      void opts; // codex usage is probed from local rollouts — no fresh-vs-cached split
+      return base.getUsage();
+    },
+    runTask: (args: RunTaskArgs) => base.runTask(args),
+  };
 }

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { deleteProject, getProjectVision, patchProject, putProjectVision } from '../api';
 import type { ConfigDto, ProjectDto, ProjectPatchDto, ProviderPref, TaskDto } from '../types';
+import { affinityOptions, providerOfPref } from '../lib';
 import { SlideOver } from './SlideOver';
 
 const SELECT_CLS =
@@ -49,8 +50,7 @@ export function ProjectDrawer({
   const confirmTimer = useRef<number | null>(null);
 
   const liveTasks = tasks.filter((t) => t.projectId === project.id && t.status !== 'archived');
-  const provider = project.provider === 'codex' ? 'codex' : 'claude';
-  const defaults = config?.providers?.[provider]?.defaults;
+  const defaults = config?.providers?.[providerOfPref(project.provider)]?.defaults;
 
   useEffect(() => {
     let cancelled = false;
@@ -167,9 +167,16 @@ export function ProjectDrawer({
                 onChange={(e) => void apply({ provider: e.target.value as ProviderPref })}
                 className={SELECT_CLS}
               >
-                <option value="any">any</option>
-                <option value="claude">claude</option>
-                <option value="codex">codex</option>
+                {affinityOptions(config).map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.text}
+                  </option>
+                ))}
+                {/* Preserve a stale account affinity (account removed) so the
+                    select doesn't silently snap to another value. */}
+                {!affinityOptions(config).some((o) => o.value === project.provider) && (
+                  <option value={project.provider}>{project.provider}</option>
+                )}
               </select>
             </label>
             <span aria-hidden="true" />
