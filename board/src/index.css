@@ -219,6 +219,71 @@ body {
   animation: burn-breathe 2.8s var(--ease-in-out) infinite;
 }
 
+/* ---------------------------------------------------------------------------
+ * Border beam (BorderBeam.tsx): a single light traveling around a rounded
+ * border. A registered --angle drives a conic-gradient that is masked to a
+ * ~1.25px ring via the padding-box/border-box composite trick, so only the
+ * border lights up and nothing layout-thrashes (only --angle animates).
+ * Subtle by design — reserved for genuinely live/active chrome, never static.
+ * ------------------------------------------------------------------------ */
+
+@property --beam-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
+@keyframes beam-spin {
+  to {
+    --beam-angle: 360deg;
+  }
+}
+@keyframes beam-spin-reverse {
+  to {
+    --beam-angle: -360deg;
+  }
+}
+
+.border-beam {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: var(--beam-width, 1.25px);
+  pointer-events: none;
+  background: conic-gradient(
+    from var(--beam-angle),
+    transparent 0deg,
+    transparent 300deg,
+    var(--beam-color) 340deg,
+    transparent 360deg
+  );
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  animation: beam-spin var(--beam-duration, 6s) linear infinite;
+}
+.border-beam[data-reverse="true"] {
+  animation-name: beam-spin-reverse;
+}
+
+/* Reduced motion / no @property support: freeze to a quiet static gradient ring */
+@media (prefers-reduced-motion: reduce) {
+  .border-beam {
+    animation: none;
+    background: linear-gradient(
+      135deg,
+      var(--beam-color),
+      transparent 60%
+    );
+    opacity: 0.6;
+  }
+}
+
 /* Running-card pulse — opacity-only ring */
 @keyframes run-ring {
   0% {

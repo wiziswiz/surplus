@@ -8,8 +8,9 @@ import type {
   ConfigPatchDto,
   StateDto,
 } from '../types';
-import { EFFORT_OPTIONS, MODEL_OPTIONS } from '../lib';
+import { EFFORT_SELECT_OPTIONS, MODEL_OPTIONS } from '../lib';
 import { SlideOver } from './SlideOver';
+import { InfoTip } from './InfoTip';
 
 // ---------------------------------------------------------------------------
 // Draft model: numbers held as strings so typing/clearing never fights the user;
@@ -164,10 +165,22 @@ function buildPatch(d: Draft): ConfigPatchDto {
 // Field primitives (playbook §7: labels above, helper text below, inline errors)
 // ---------------------------------------------------------------------------
 
-function Section({ title, children }: { title: string; children: ReactNode }) {
+function Section({
+  title,
+  tip,
+  children,
+}: {
+  title: string;
+  /** Optional InfoTip rendered beside the section title. */
+  tip?: ReactNode;
+  children: ReactNode;
+}) {
   return (
     <section className="flex flex-col gap-4">
-      <h3 className="text-xs font-medium uppercase tracking-[0.12em] text-faint">{title}</h3>
+      <h3 className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-[0.12em] text-faint">
+        {title}
+        {tip}
+      </h3>
       {children}
     </section>
   );
@@ -211,6 +224,7 @@ function Toggle({
 function NumField({
   id,
   label,
+  labelTip,
   unit,
   help,
   value,
@@ -222,6 +236,7 @@ function NumField({
 }: {
   id: string;
   label: string;
+  labelTip?: ReactNode;
   unit: string;
   help?: string;
   value: string;
@@ -233,9 +248,12 @@ function NumField({
 }) {
   return (
     <div className="flex flex-col gap-1">
-      <label htmlFor={id} className="text-sm font-medium text-ink">
-        {label}
-      </label>
+      <span className="flex items-center gap-1.5">
+        <label htmlFor={id} className="text-sm font-medium text-ink">
+          {label}
+        </label>
+        {labelTip}
+      </span>
       <div className="flex items-center gap-2">
         <input
           id={id}
@@ -266,9 +284,12 @@ function NumField({
   );
 }
 
+type SelectOption = string | { value: string; label: string };
+
 function SelectField({
   id,
   label,
+  labelTip,
   help,
   value,
   options,
@@ -276,18 +297,27 @@ function SelectField({
 }: {
   id: string;
   label: string;
+  /** Optional InfoTip rendered beside the label. */
+  labelTip?: ReactNode;
   help?: string;
   value: string;
-  options: string[];
+  /** Accepts plain strings (value=label) OR {value,label} pairs. */
+  options: SelectOption[];
   onChange: (v: string) => void;
 }) {
+  const normalized = options.map((o) => (typeof o === 'string' ? { value: o, label: o } : o));
   // Preserve a custom (hand-edited config) value even if it's not in the list.
-  const opts = options.includes(value) ? options : [value, ...options];
+  const opts = normalized.some((o) => o.value === value)
+    ? normalized
+    : [{ value, label: value }, ...normalized];
   return (
     <div className="flex flex-col gap-1">
-      <label htmlFor={id} className="text-sm font-medium text-ink">
-        {label}
-      </label>
+      <span className="flex items-center gap-1.5">
+        <label htmlFor={id} className="text-sm font-medium text-ink">
+          {label}
+        </label>
+        {labelTip}
+      </span>
       <select
         id={id}
         value={value}
@@ -296,8 +326,8 @@ function SelectField({
         className="field-input w-full max-w-80"
       >
         {opts.map((o) => (
-          <option key={o} value={o}>
-            {o}
+          <option key={o.value} value={o.value}>
+            {o.label}
           </option>
         ))}
       </select>
@@ -736,6 +766,16 @@ export function SettingsPanel({
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [apiErr, setApiErr] = useState<string | null>(null);
+  // Simple-by-default tiering: advanced sections render only when toggled on.
+  // The choice persists, but every field stays in the Draft + buildPatch so
+  // advanced values always submit regardless of what's currently visible.
+  const [advanced, setAdvanced] = useState<boolean>(
+    () => localStorage.getItem('surplus.settingsAdvanced') === '1',
+  );
+  const setAdvancedPersist = (v: boolean) => {
+    setAdvanced(v);
+    localStorage.setItem('surplus.settingsAdvanced', v ? '1' : '0');
+  };
 
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => {
     setDraft((d) => ({ ...d, [key]: value }));
@@ -787,13 +827,41 @@ export function SettingsPanel({
         <>
           <div className="flex items-center justify-between gap-3 border-b border-line px-6 py-4">
             <h2 className="text-base font-semibold text-ink">Settings</h2>
-            <button
-              onClick={close}
-              aria-label="Close settings"
-              className="rounded-chip px-2 py-1 text-dim transition-colors duration-150 hover:bg-overlay hover:text-ink"
-            >
-              ✕
-            </button>
+            <div className="flex items-center gap-3">
+              <div
+                role="group"
+                aria-label="Detail level"
+                className="flex items-center gap-0.5 rounded-chip bg-overlay p-0.5"
+              >
+                <button
+                  type="button"
+                  aria-pressed={!advanced}
+                  onClick={() => setAdvancedPersist(false)}
+                  className={`rounded-chip px-2.5 py-1 text-xs font-medium transition-colors duration-150 ${
+                    !advanced ? 'bg-ember/20 text-ember' : 'text-dim hover:text-ink'
+                  }`}
+                >
+                  Simple
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={advanced}
+                  onClick={() => setAdvancedPersist(true)}
+                  className={`rounded-chip px-2.5 py-1 text-xs font-medium transition-colors duration-150 ${
+                    advanced ? 'bg-ember/20 text-ember' : 'text-dim hover:text-ink'
+                  }`}
+                >
+                  Advanced
+                </button>
+              </div>
+              <button
+                onClick={close}
+                aria-label="Close settings"
+                className="rounded-chip px-2 py-1 text-dim transition-colors duration-150 hover:bg-overlay hover:text-ink"
+              >
+                ✕
+              </button>
+            </div>
           </div>
 
           <div className="flex flex-1 flex-col gap-8 px-6 py-6">
@@ -807,69 +875,63 @@ export function SettingsPanel({
               />
               <div className="grid grid-cols-2 gap-4">
                 {num('burnWindowHours', 'Burn window', 'h', 'Enter burn mode this many hours before the weekly reset.')}
-                {num('stopAtPct', 'Stop at', '%', 'Stop burning when 7-day utilization reaches this.')}
+                <NumField
+                  id="set-stopAtPct"
+                  label="Stop at"
+                  labelTip={
+                    <InfoTip
+                      label="What does Stop at mean?"
+                      text="Surplus stops burning once your weekly usage reaches this, so it never fully drains the week."
+                    />
+                  }
+                  unit="%"
+                  help="Stop burning when 7-day utilization reaches this."
+                  value={draft.stopAtPct}
+                  error={errors.stopAtPct}
+                  min={RULES.stopAtPct.min}
+                  max={RULES.stopAtPct.max}
+                  onChange={(v) => set('stopAtPct', v)}
+                  onBlur={() => blurCheck('stopAtPct')}
+                />
               </div>
-              <Toggle
-                id="set-burstEnabled"
-                label="5-hour burst"
-                help="Squeeze the tail of each 5-hour window when it would otherwise expire unused."
-                checked={draft.burstEnabled}
-                onChange={(v) => set('burstEnabled', v)}
-              />
-              <div className="grid grid-cols-2 gap-4">
-                {num('triggerMinutesBeforeReset', 'Trigger before reset', 'min')}
-                {num('weeklyGuardPct', 'Weekly guard', '%', 'Never burst once 7-day utilization is at or above this.')}
-              </div>
+              {advanced && (
+                <>
+                  <Toggle
+                    id="set-burstEnabled"
+                    label="5-hour burst"
+                    help="Squeeze the tail of each 5-hour window when it would otherwise expire unused."
+                    checked={draft.burstEnabled}
+                    onChange={(v) => set('burstEnabled', v)}
+                  />
+                  <div className="grid grid-cols-2 gap-4">
+                    {num('triggerMinutesBeforeReset', 'Trigger before reset', 'min')}
+                    {num('weeklyGuardPct', 'Weekly guard', '%', 'Never burst once 7-day utilization is at or above this.')}
+                  </div>
+                </>
+              )}
             </Section>
 
-            <Section title="Reserve">
+            <Section
+              title="Reserve"
+              tip={
+                <InfoTip
+                  label="What is Reserve?"
+                  text="Quota surplus never touches — leaves room for your other tools (like scheduled scripts or assistants) that share the same Claude login."
+                />
+              }
+            >
               <p className="-mt-2 max-w-sm text-xs leading-relaxed text-dim">
-                Quota kept for your other agents on the same subscriptions — surplus never
-                touches it, and a mid-run watchdog aborts a worker that crosses a ceiling.
+                Quota left for your other tools on the same login — surplus never touches it.
               </p>
               <div className="grid grid-cols-2 gap-4">
                 {num('reserveWeeklyPct', 'Weekly reserve', '%', 'Of the 7-day window, always left untouched.')}
                 {num('reserveFiveHourPct', '5-hour reserve', '%', 'Of each 5-hour window, always left untouched.')}
               </div>
-              {num('watchdogIntervalMinutes', 'Watchdog interval', 'min', 'How often a running task re-checks usage against the ceilings.')}
+              {advanced &&
+                num('watchdogIntervalMinutes', 'Watchdog interval', 'min', 'How often a running task re-checks usage against the ceilings.')}
             </Section>
 
-            <Section title="Pacing">
-              {num('fiveHourPausePct', '5-hour pause at', '%', 'Between launches, wait for the 5-hour reset once utilization hits this.')}
-            </Section>
-
-            <Section title="Discovery">
-              <div className="flex flex-col gap-1">
-                <label htmlFor="set-discoveryRoots" className="text-sm font-medium text-ink">
-                  Scan folders
-                </label>
-                <input
-                  id="set-discoveryRoots"
-                  type="text"
-                  value={draft.discoveryRoots}
-                  onChange={(e) => set('discoveryRoots', e.target.value)}
-                  placeholder="~/Projects, ~/Code"
-                  aria-describedby="set-discoveryRoots-help"
-                  className="field-input w-full max-w-80"
-                />
-                <p
-                  id="set-discoveryRoots-help"
-                  className="max-w-xs text-xs leading-relaxed text-faint"
-                >
-                  Comma-separated folders the Add-Project picker scans for git repos. ~ is your
-                  home folder.
-                </p>
-              </div>
-            </Section>
-
-            <Section title="Dispatcher">
-              <div className="grid grid-cols-2 gap-4">
-                {num('maxConcurrent', 'Max concurrent', 'tasks')}
-                {num('maxAttempts', 'Max attempts', 'tries', 'Failed attempts before a task is auto-blocked.')}
-                {num('taskTimeoutMinutes', 'Task timeout', 'min', 'Hard wall-clock cap per run.')}
-                {num('maxTurnsHint', 'Turn hint', 'turns', 'Suggested turn bound embedded in the goal condition.')}
-              </div>
-            </Section>
+            <AccountsSection config={config} usage={state.usage} onSaved={onSaved} />
 
             <Section title="Providers">
               <div className="flex flex-col gap-3 rounded-card bg-overlay p-4">
@@ -887,8 +949,14 @@ export function SettingsPanel({
                   <SelectField
                     id="set-claudeEffort"
                     label="Default effort"
+                    labelTip={
+                      <InfoTip
+                        label="What is effort?"
+                        text="How hard the model works per task. 'max' is the highest."
+                      />
+                    }
                     value={draft.claudeEffort}
-                    options={EFFORT_OPTIONS}
+                    options={EFFORT_SELECT_OPTIONS}
                     onChange={(v) => set('claudeEffort', v)}
                   />
                 </div>
@@ -904,58 +972,121 @@ export function SettingsPanel({
                   checked={draft.codexEnabled}
                   onChange={(v) => set('codexEnabled', v)}
                 />
-                <div className="grid grid-cols-2 gap-4">
-                  <SelectField
-                    id="set-codexModel"
-                    label="Default model"
-                    value={draft.codexModel}
-                    options={MODEL_OPTIONS.codex}
-                    onChange={(v) => set('codexModel', v)}
-                  />
-                  <SelectField
-                    id="set-codexEffort"
-                    label="Default effort"
-                    value={draft.codexEffort}
-                    options={EFFORT_OPTIONS}
-                    onChange={(v) => set('codexEffort', v)}
-                  />
-                </div>
-                <div className="flex flex-col gap-1">
-                  <label htmlFor="set-codexFallback" className="text-sm font-medium text-ink">
-                    Weekly reset fallback
-                  </label>
-                  <input
-                    id="set-codexFallback"
-                    type="text"
-                    value={draft.codexWeeklyResetFallback}
-                    onChange={(e) => set('codexWeeklyResetFallback', e.target.value)}
-                    placeholder="Thu 21:00"
-                    aria-describedby="set-codexFallback-help"
-                    className="field-input w-full max-w-80"
-                  />
-                  <p id="set-codexFallback-help" className="max-w-xs text-xs leading-relaxed text-faint">
-                    Known weekly reset when live usage isn't discoverable from the codex CLI.
-                    Leave empty to clear.
-                  </p>
-                </div>
+                {draft.codexEnabled && (
+                  <div className="grid grid-cols-2 gap-4">
+                    <SelectField
+                      id="set-codexModel"
+                      label="Default model"
+                      value={draft.codexModel}
+                      options={MODEL_OPTIONS.codex}
+                      onChange={(v) => set('codexModel', v)}
+                    />
+                    <SelectField
+                      id="set-codexEffort"
+                      label="Default effort"
+                      labelTip={
+                        <InfoTip
+                          label="What is effort?"
+                          text="How hard the model works per task. 'max' is the highest."
+                        />
+                      }
+                      value={draft.codexEffort}
+                      options={EFFORT_SELECT_OPTIONS}
+                      onChange={(v) => set('codexEffort', v)}
+                    />
+                  </div>
+                )}
+                {advanced && (
+                  <div className="flex flex-col gap-1">
+                    <span className="flex items-center gap-1.5">
+                      <label htmlFor="set-codexFallback" className="text-sm font-medium text-ink">
+                        Weekly reset fallback
+                      </label>
+                      <InfoTip
+                        label="What is the codex weekly reset fallback?"
+                        text="Only needed if surplus can't read your Codex usage automatically (it usually can, from Codex's own session files). If your gauges stay blank, set your weekly reset here as a backup, e.g. 'Thu 21:00'."
+                      />
+                    </span>
+                    <input
+                      id="set-codexFallback"
+                      type="text"
+                      value={draft.codexWeeklyResetFallback}
+                      onChange={(e) => set('codexWeeklyResetFallback', e.target.value)}
+                      placeholder="Thu 21:00"
+                      aria-describedby="set-codexFallback-help"
+                      className="field-input w-full max-w-80"
+                    />
+                    <p id="set-codexFallback-help" className="max-w-xs text-xs leading-relaxed text-faint">
+                      Known weekly reset when live usage isn't discoverable from the codex CLI.
+                      Leave empty to clear.
+                    </p>
+                  </div>
+                )}
               </div>
             </Section>
 
-            <AccountsSection config={config} usage={state.usage} onSaved={onSaved} />
+            {advanced && (
+              <>
+                <Section title="Pacing">
+                  {num('fiveHourPausePct', '5-hour pause at', '%', 'Between launches, wait for the 5-hour reset once utilization hits this.')}
+                </Section>
 
-            <Section title="Judge">
-              <div className="grid grid-cols-2 gap-4">
-                <SelectField
-                  id="set-judgeModel"
-                  label="Judge model"
-                  help="Always runs on claude; cheap models judge fine."
-                  value={draft.judgeModel}
-                  options={MODEL_OPTIONS.claude}
-                  onChange={(v) => set('judgeModel', v)}
-                />
-                {num('judgePassScore', 'Pass score', '/ 5', 'Judge score at or above which a run counts as done.')}
-              </div>
-            </Section>
+                <Section
+                  title="Dispatcher"
+                  tip={
+                    <InfoTip
+                      label="What is the Dispatcher?"
+                      text="How tasks run under the hood — how many at once, retries, and time limits. Defaults are fine for almost everyone."
+                    />
+                  }
+                >
+                  <div className="grid grid-cols-2 gap-4">
+                    {num('maxConcurrent', 'Max concurrent', 'tasks')}
+                    {num('maxAttempts', 'Max attempts', 'tries', 'Failed attempts before a task is auto-blocked.')}
+                    {num('taskTimeoutMinutes', 'Task timeout', 'min', 'Hard wall-clock cap per run.')}
+                    {num('maxTurnsHint', 'Turn hint', 'turns', 'Suggested turn bound embedded in the goal condition.')}
+                  </div>
+                </Section>
+
+                <Section title="Discovery">
+                  <div className="flex flex-col gap-1">
+                    <label htmlFor="set-discoveryRoots" className="text-sm font-medium text-ink">
+                      Scan folders
+                    </label>
+                    <input
+                      id="set-discoveryRoots"
+                      type="text"
+                      value={draft.discoveryRoots}
+                      onChange={(e) => set('discoveryRoots', e.target.value)}
+                      placeholder="~/Projects, ~/Code"
+                      aria-describedby="set-discoveryRoots-help"
+                      className="field-input w-full max-w-80"
+                    />
+                    <p
+                      id="set-discoveryRoots-help"
+                      className="max-w-xs text-xs leading-relaxed text-faint"
+                    >
+                      Comma-separated folders the Add-Project picker scans for git repos. ~ is
+                      your home folder.
+                    </p>
+                  </div>
+                </Section>
+
+                <Section title="Judge">
+                  <div className="grid grid-cols-2 gap-4">
+                    <SelectField
+                      id="set-judgeModel"
+                      label="Judge model"
+                      help="Always runs on claude; cheap models judge fine."
+                      value={draft.judgeModel}
+                      options={MODEL_OPTIONS.claude}
+                      onChange={(v) => set('judgeModel', v)}
+                    />
+                    {num('judgePassScore', 'Pass score', '/ 5', 'Judge score at or above which a run counts as done.')}
+                  </div>
+                </Section>
+              </>
+            )}
 
             <ServiceSection />
           </div>

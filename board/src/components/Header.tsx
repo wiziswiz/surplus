@@ -9,6 +9,7 @@ import type {
 } from '../types';
 import { fmtCountdown, fmtRel } from '../lib';
 import { useNow } from '../useNow';
+import { BorderBeam } from './BorderBeam';
 
 /** Placeholder while /api/state is still loading (claude is enabled by default). */
 const LOADING_ACCOUNTS: AccountInfoDto[] = [
@@ -61,13 +62,14 @@ export function Header({
                   ? 'Scheduler armed: surplus checks usage every 15 min and burns in pre-reset windows. Click to disarm.'
                   : 'Arm the scheduler: installs the background agent that burns expiring quota automatically.'
               }
-              className={`rounded-chip px-2.5 py-1 text-xs font-semibold transition-colors duration-150 disabled:opacity-50 ${
+              className={`relative overflow-hidden rounded-chip px-2.5 py-1 text-xs font-semibold transition-colors duration-150 disabled:opacity-50 ${
                 armed
                   ? 'bg-jade/20 text-jade hover:bg-jade/30'
                   : 'bg-ember/20 text-ember hover:bg-ember/30'
               }`}
             >
               {armed ? '⏻ Armed' : 'Arm schedule'}
+              {armed && <BorderBeam color="oklch(0.76 0.115 175)" durationSec={7} />}
             </button>
             <button
               onClick={onTogglePause}
@@ -311,8 +313,9 @@ function DecisionBanner({ decision }: { decision?: DecisionDto }) {
   if (!decision) return null;
   if (decision.action === 'burn') {
     return (
-      <span className="burn-banner rounded-chip bg-overlay px-2 py-0.5 text-[11px] font-semibold text-ember">
+      <span className="burn-banner relative overflow-hidden rounded-chip bg-overlay px-2 py-0.5 text-[11px] font-semibold text-ember">
         BURNING — {decision.mode === 'fiveHourBurst' ? '5h burst' : 'weekly surplus'}
+        <BorderBeam durationSec={4} />
       </span>
     );
   }

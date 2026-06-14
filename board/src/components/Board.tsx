@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react';
 import type { ConfigDto, ProjectDto, TaskDto, TaskStatus } from '../types';
 import { TaskCard } from './TaskCard';
+import { BorderBeam } from './BorderBeam';
 
 const COLUMNS: { status: TaskStatus; label: string }[] = [
   { status: 'triage', label: 'Triage' },
@@ -124,7 +125,7 @@ function Column({
   return (
     <section
       aria-label={`${label} column`}
-      className={`flex shrink-0 flex-col rounded-card transition-[background-color,box-shadow] duration-200 ${
+      className={`relative flex shrink-0 flex-col overflow-hidden rounded-card transition-[background-color,box-shadow] duration-200 ${
         running
           ? 'w-80 bg-raised shadow-md ring-1 ring-ember/20'
           : `w-72 ${over ? 'bg-ember/5 ring-1 ring-ember/50' : ''}`
@@ -175,6 +176,8 @@ function Column({
         )}
         {droppable && <AddTaskInline status={status} projects={projects} onAddTask={onAddTask} />}
       </div>
+      {/* A live task is running — a slow ember beam signals the column is hot. */}
+      {running && tasks.length > 0 && <BorderBeam durationSec={8} widthPx={1.5} />}
     </section>
   );
 }

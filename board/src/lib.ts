@@ -88,9 +88,9 @@ export function providerTint(pref: ProviderPref): string {
 }
 
 export const MODEL_OPTIONS: Record<Provider | 'any', string[]> = {
-  claude: ['opus', 'sonnet', 'haiku'],
+  claude: ['fable', 'opus', 'sonnet', 'haiku'],
   codex: ['gpt-5.1-codex', 'gpt-5.1-codex-mini', 'gpt-5.1'],
-  any: ['opus', 'sonnet', 'haiku', 'gpt-5.1-codex', 'gpt-5.1-codex-mini'],
+  any: ['fable', 'opus', 'sonnet', 'haiku', 'gpt-5.1-codex', 'gpt-5.1-codex-mini'],
 };
 
 /** Model picker options for any affinity pref ('claude:<id>' → claude models). */
@@ -99,6 +99,15 @@ export function modelOptionsFor(pref: ProviderPref): string[] {
 }
 
 export const EFFORT_OPTIONS = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+/** Effort picker with a human-friendly label on the top level ('max' = highest). */
+export const EFFORT_SELECT_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: 'low', label: 'low' },
+  { value: 'medium', label: 'medium' },
+  { value: 'high', label: 'high' },
+  { value: 'xhigh', label: 'xhigh' },
+  { value: 'max', label: 'max (highest)' },
+];
 
 export function scoreColor(score: number): string {
   if (score >= 4) return 'var(--color-jade)';
