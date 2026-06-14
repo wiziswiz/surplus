@@ -1,5 +1,4 @@
-import { useId, useState } from 'react';
-import type { KeyboardEvent } from 'react';
+import { useEffect, useId, useState } from 'react';
 
 /**
  * A small circled-"i" button that reveals a plain-English tooltip on hover AND
@@ -19,12 +18,24 @@ export function InfoTip({ label, text }: { label: string; text: string }) {
     setOpen(true);
   };
 
-  const onKeyDown = (e: KeyboardEvent<HTMLButtonElement>) => {
-    if (e.key === 'Escape' && open) {
-      e.stopPropagation();
-      setOpen(false);
-    }
-  };
+  // While the tooltip is open, intercept Escape before it reaches the Settings
+  // SlideOver. SlideOver listens for Escape on `document` in the capture phase
+  // and unconditionally closes the whole panel, so a bubble-phase React handler
+  // here would never run. Listening on `window` in the capture phase fires
+  // earlier in the dispatch path than `document`, letting us swallow Escape
+  // (stopImmediatePropagation) and close only the tooltip.
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.stopImmediatePropagation();
+        e.stopPropagation();
+        setOpen(false);
+      }
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [open]);
 
   return (
     <span className="relative inline-flex">
@@ -36,7 +47,6 @@ export function InfoTip({ label, text }: { label: string; text: string }) {
         onMouseLeave={() => setOpen(false)}
         onFocus={(e) => show(e.currentTarget)}
         onBlur={() => setOpen(false)}
-        onKeyDown={onKeyDown}
         className="inline-flex h-3.5 w-3.5 items-center justify-center rounded-full text-faint transition-colors duration-150 hover:text-ink"
       >
         <svg
