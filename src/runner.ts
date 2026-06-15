@@ -11,7 +11,7 @@
  */
 
 import { execFileSync, spawn } from 'node:child_process';
-import { createWriteStream, existsSync, mkdirSync, rmSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync, rmSync, symlinkSync } from 'node:fs';
 import * as path from 'node:path';
 import type { RunOutcome, RunnerResult, RunTaskArgs, TaskRow } from './types.js';
 import { sanitizeAccountKey } from './config.js';
@@ -192,6 +192,34 @@ function branchExists(projectPath: string, branch: string): boolean {
 }
 
 /**
+ * Best-effort: link the project's node_modules into a fresh worktree.
+ *
+ * `git worktree add` checks out tracked files only — node_modules is gitignored,
+ * so a worktree under ~/.surplus/worktrees has no deps and `npm test` / `npx tsc`
+ * cannot resolve them (node won't walk up that path to the real project). A
+ * symlink <worktree>/node_modules → <project>/node_modules lets the worker (and
+ * the judge's verify step) actually run the project's commands.
+ *
+ * Shared by prepareWorktree (worker side) and the judge's ephemeral worktree so
+ * both run against the same installed deps. Never throws — a missing or
+ * unsymlinkable node_modules just means commands fall back to "no deps".
+ *
+ * Scope note: deliberately limited to node_modules. A future extension could
+ * also link a top-level '.venv' for Python projects; out of scope for now.
+ */
+export function symlinkNodeModules(worktreePath: string, projectPath: string): void {
+  try {
+    const src = path.join(projectPath, 'node_modules');
+    const dest = path.join(worktreePath, 'node_modules');
+    if (existsSync(src) && !existsSync(dest)) {
+      symlinkSync(src, dest, 'dir');
+    }
+  } catch {
+    /* best-effort: never block a run on missing/unsymlinkable deps */
+  }
+}
+
+/**
  * Create (or resume) the task's worktree at <worktreesDir>/<task.id> on
  * branch surplus/<task.id>. Cleans up stale worktrees defensively.
  */
@@ -231,6 +259,10 @@ export function prepareWorktree(args: {
     // Fresh attempt: new branch from HEAD.
     git(projectPath, ['worktree', 'add', '-b', branch, worktreePath]);
   }
+
+  // Link in node_modules so the worker can actually run `npm test` etc. in the
+  // fresh worktree (gitignored deps are absent from `git worktree add`).
+  symlinkNodeModules(worktreePath, projectPath);
 
   return { worktreePath, branch };
 }

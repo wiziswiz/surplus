@@ -26,7 +26,15 @@ import type {
   Vision,
 } from './types.js';
 
-import { loadConfig, saveConfig, ensureDirs, isPaused, setPaused, configPath } from './config.js';
+import {
+  loadConfig,
+  saveConfig,
+  ensureDirs,
+  isPaused,
+  setPaused,
+  configPath,
+  worktreesDir as worktreesDirPath,
+} from './config.js';
 import { decide } from './decide.js';
 import { openDb } from './db.js';
 import type { SurplusDb, TaskPatch } from './db.js';
@@ -102,6 +110,9 @@ function buildDeps(nowFn: () => number = () => Date.now()): CliDeps {
         },
         judgeModel: config.judge.model,
         projectPath: args.project.path,
+        // Ephemeral judge worktree lives under ~/.surplus/worktrees as
+        // judge-<taskId> (distinct from the live run's <taskId> worktree).
+        worktreesDir: worktreesDirPath(),
       }),
     loadVision: (project: ProjectRow): Vision => {
       try {
