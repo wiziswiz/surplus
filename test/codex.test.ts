@@ -145,7 +145,9 @@ describe('mapCodexEffort', () => {
 });
 
 describe('classifyExit', () => {
-  const base = { timedOut: false, signal: null, exitCode: 0, outputTail: '', summary: 'done' };
+  // NOTE: classification reads stderrTail + summary ONLY — never the stdout
+  // transcript (which carries the project's own shell/build/test output).
+  const base = { timedOut: false, signal: null, exitCode: 0, stderrTail: '', summary: 'done' };
 
   it('timeout wins over everything', () => {
     expect(classifyExit({ ...base, timedOut: true, exitCode: 1 })).toBe('timeout');
@@ -155,18 +157,18 @@ describe('classifyExit', () => {
     expect(classifyExit({ ...base, signal: 'SIGTERM', exitCode: null })).toBe('killed');
   });
 
-  it('nonzero exit with quota/auth text in the tail → quota', () => {
+  it('nonzero exit with quota/auth text in stderr → quota', () => {
     expect(
-      classifyExit({ ...base, exitCode: 1, outputTail: 'ERROR: you have hit your usage limit' }),
+      classifyExit({ ...base, exitCode: 1, stderrTail: 'ERROR: you have hit your usage limit' }),
     ).toBe('quota');
-    expect(classifyExit({ ...base, exitCode: 1, outputTail: 'HTTP 401 Unauthorized' })).toBe('quota');
+    expect(classifyExit({ ...base, exitCode: 1, stderrTail: 'HTTP 401 Unauthorized' })).toBe('quota');
     expect(
-      classifyExit({ ...base, exitCode: 1, outputTail: 'Not logged in. Please run `codex login`.' }),
+      classifyExit({ ...base, exitCode: 1, stderrTail: 'Not logged in. Please run `codex login`.' }),
     ).toBe('quota');
   });
 
   it('nonzero exit without quota text → error', () => {
-    expect(classifyExit({ ...base, exitCode: 2, outputTail: 'panicked at main.rs' })).toBe('error');
+    expect(classifyExit({ ...base, exitCode: 2, stderrTail: 'panicked at main.rs' })).toBe('error');
   });
 
   it('clean completion → failed (completed-pending-judge convention)', () => {
@@ -177,6 +179,83 @@ describe('classifyExit', () => {
     expect(
       classifyExit({ ...base, exitCode: 0, summary: 'I reached the usage limit and had to stop.' }),
     ).toBe('quota');
+  });
+
+  it("nonzero exit with a connection-level failure → infra (not quota, not error)", () => {
+    for (const text of [
+      'API Error: Unable to connect to API (ConnectionRefused)',
+      'error sending request: ECONNREFUSED',
+      'getaddrinfo ENOTFOUND chatgpt.com',
+      'socket hang up',
+      'received 503 Service Unavailable from upstream',
+      'network is unreachable',
+    ]) {
+      expect(classifyExit({ ...base, exitCode: 1, stderrTail: text })).toBe('infra');
+    }
+    // Matches in the summary (agent final message) too.
+    expect(
+      classifyExit({ ...base, exitCode: 1, summary: 'connection refused', stderrTail: '' }),
+    ).toBe('infra');
+  });
+
+  it('infra is for a PURE connection failure (no quota/auth token) on nonzero exit', () => {
+    expect(
+      classifyExit({ ...base, exitCode: 1, stderrTail: 'Unable to connect to API (ConnectionRefused)' }),
+    ).toBe('infra');
+  });
+
+  it('quota/auth served AS a 5xx stays quota (QUOTA_AUTH_RE tested before INFRA_RE)', () => {
+    // Providers serve rate-limit/overload/auth-expiry as HTTP 5xx. A message that
+    // NAMES the quota/auth condition must feed the quota path, not be refunded as infra.
+    expect(
+      classifyExit({ ...base, exitCode: 1, stderrTail: 'HTTP 503: rate limit exceeded, please retry later' }),
+    ).toBe('quota');
+    expect(
+      classifyExit({ ...base, exitCode: 1, stderrTail: 'Error: too many requests (503 Service Unavailable)' }),
+    ).toBe('quota');
+    expect(
+      classifyExit({ ...base, exitCode: 1, stderrTail: 'connection refused: token expired, please re-login' }),
+    ).toBe('quota');
+  });
+
+  it('bare 5xx-as-DATA does NOT match infra (anchored to an HTTP context)', () => {
+    // Benign project/test output carrying a standalone 5xx number (row count /
+    // status assertion) must NOT be misclassified as a transient infra blip —
+    // that would refund + loop a real failure instead of blocking it.
+    expect(classifyExit({ ...base, exitCode: 1, stderrTail: 'Retrieved 502 rows from db' })).toBe('error');
+    expect(classifyExit({ ...base, exitCode: 1, stderrTail: 'expected 200 but got 503' })).toBe('error');
+    expect(classifyExit({ ...base, exitCode: 1, stderrTail: 'processed 504 records, 0 failures' })).toBe(
+      'error',
+    );
+    // ...but a genuine gateway 5xx (HTTP-anchored / gateway phrase) IS infra.
+    expect(
+      classifyExit({ ...base, exitCode: 1, stderrTail: 'HTTP 503 Service Unavailable from upstream' }),
+    ).toBe('infra');
+  });
+
+  it('the stdout transcript is NOT scanned: a real failure with project 5xx output stays error', () => {
+    // Regression for finding #1/#3: classifyExit no longer takes the merged
+    // stdout+stderr transcript. A genuine task failure whose final message carries
+    // a project-output connection token must NOT be reclassified as infra. Here
+    // both stderr and summary are benign, so the run stays 'error' (and blocks).
+    expect(
+      classifyExit({ ...base, exitCode: 1, stderrTail: 'codex: agent reported task incomplete', summary: 'tests failed' }),
+    ).toBe('error');
+  });
+
+  it('a clean exit 0 is never infra even with connection-y summary text', () => {
+    expect(
+      classifyExit({ ...base, exitCode: 0, summary: 'Done (had a transient socket hang up but retried).' }),
+    ).toBe('failed');
+  });
+
+  it('our deliberate stops outrank infra: timeout and signal still win', () => {
+    expect(classifyExit({ ...base, timedOut: true, exitCode: 1, stderrTail: 'ECONNREFUSED' })).toBe(
+      'timeout',
+    );
+    expect(
+      classifyExit({ ...base, signal: 'SIGTERM', exitCode: null, stderrTail: 'connection refused' }),
+    ).toBe('killed');
   });
 });
 

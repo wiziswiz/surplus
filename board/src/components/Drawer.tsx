@@ -299,6 +299,7 @@ const OUTCOME_TINT: Record<string, string> = {
   timeout: 'bg-danger/15 text-danger',
   quota: 'bg-raised text-dim', // raised, not overlay — chip sits ON an overlay row
   killed: 'bg-raised text-dim',
+  infra: 'bg-raised text-dim', // transient API blip, attempt refunded + auto-requeued — non-merit, muted family
 };
 
 function RunItem({ run }: { run: RunDto }) {

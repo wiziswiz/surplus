@@ -75,7 +75,13 @@ export interface DispatchResult {
 // ---------------------------------------------------------------------------
 
 /** Outcomes where judging is pointless — the work session never completed. */
-const JUDGE_SKIP: ReadonlySet<RunOutcome> = new Set(['error', 'timeout', 'killed', 'quota']);
+const JUDGE_SKIP: ReadonlySet<RunOutcome> = new Set([
+  'error',
+  'timeout',
+  'killed',
+  'quota',
+  'infra', // transient API-unreachable blip — there is nothing to judge
+]);
 
 const AUTH_ERROR_RE = /quota|rate.?limit|401|authentication|expired/i;
 
@@ -401,6 +407,24 @@ async function runOne(
   if (passed) {
     db.updateTask(task.id, { status: 'done', judgeFeedback: null });
     log(`dispatch: task ${task.id} done (judge ${verdict!.score}/5)`);
+  } else if (result.outcome === 'infra') {
+    // Transient infra error (lost API connection / network blip / server 5xx):
+    // the run DID NOT COMPLETE — this is not the task failing. Mirror the quota
+    // refund (the claim-time attempt increment is undone) and ALWAYS requeue to
+    // 'ready' — NEVER 'blocked', even if attempts were already at max. A single
+    // wifi hiccup must never permanently block good work. The tick also halts
+    // below (respawn-guard style), so retries are naturally rate-limited to one
+    // per tick (~15 min) — no immediate re-run into an unreachable API.
+    const reason = redact((result.summary ?? '').split('\n')[0] ?? '').slice(0, 160) || 'API unreachable';
+    db.updateTask(task.id, {
+      status: 'ready',
+      attempts: Math.max(0, fresh.attempts - 1),
+      judgeFeedback: buildFeedback(verdict, result, fresh.judgeFeedback),
+    });
+    log(
+      `dispatch: task ${task.id} requeued (infra error, attempt refunded — run did not ` +
+        `complete; not counted; reason: ${reason})`,
+    );
   } else {
     // Non-merit interruptions (reserve-watchdog/quota stops, user pause)
     // refund the claim-time attempt increment: the watchdog is DESIGNED to
@@ -421,9 +445,13 @@ async function runOne(
     );
   }
 
-  // Respawn guard: quota outcomes or auth-looking errors stop the entire tick.
+  // Respawn guard: quota outcomes, transient infra errors, or auth-looking
+  // errors stop the entire tick. For 'infra' it's pointless to immediately
+  // re-run into an unreachable API — the next 15-min tick (or next manual burn)
+  // retries naturally, which also bounds churn to one infra retry per tick.
   const respawnGuard =
     result.outcome === 'quota' ||
+    result.outcome === 'infra' ||
     (result.outcome === 'error' && AUTH_ERROR_RE.test(result.summary ?? ''));
 
   return { outcome: finalOutcome, respawnGuard };
@@ -504,11 +532,19 @@ export async function dispatchTick(deps: DispatchDeps): Promise<DispatchResult> 
     results.push({ taskId: claimedTask.id, provider: claimedAccount.key, outcome });
 
     if (respawnGuard) {
-      db.appendEvent('decision', null, {
-        action: 'stop',
-        reason: `respawn guard: ${claimedAccount.key} auth/quota error`,
-      });
-      log(`dispatch: respawn guard tripped on ${claimedAccount.key} — stopping tick`);
+      // 'infra' gets a distinct, accurate stop reason: the API was unreachable,
+      // so we halt this tick and let the next 15-min tick / next manual burn
+      // retry naturally (the attempt was refunded, the task is back to 'ready').
+      const reason =
+        outcome === 'infra'
+          ? `infra error: ${claimedAccount.provider} API unreachable — will retry next tick`
+          : `respawn guard: ${claimedAccount.key} auth/quota error`;
+      db.appendEvent('decision', null, { action: 'stop', reason });
+      log(
+        outcome === 'infra'
+          ? `dispatch: infra error on ${claimedAccount.key} (API unreachable) — stopping tick, will retry next tick`
+          : `dispatch: respawn guard tripped on ${claimedAccount.key} — stopping tick`,
+      );
       break;
     }
 

@@ -282,7 +282,12 @@ export type RunOutcome =
   | 'error'         // claude exited non-zero / crashed
   | 'timeout'       // hit taskTimeoutMinutes wall
   | 'quota'         // stopped because usage hit limits mid-run
-  | 'killed';       // user paused / SIGTERM
+  | 'killed'        // user paused / SIGTERM
+  | 'infra';        // transient infrastructure error — lost API connection /
+                    // network blip / server-unreachable (5xx). NOT quota/auth
+                    // (those stay 'quota'): the run did not COMPLETE, so the
+                    // dispatcher refunds the attempt and requeues (never blocks)
+                    // — a wifi hiccup must not permanently block good work.
 
 export interface TaskRunRow {
   id: string;

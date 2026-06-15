@@ -80,6 +80,21 @@ const QUOTA_AUTH_RE =
 const HARD_LIMIT_RE =
   /((hit|reached|exceeded)[^.\n]{0,60}(usage|rate).?limit|(usage|rate).?limit (reached|exceeded|hit)|out of (quota|credits)|upgrade to continue)/i;
 
+/**
+ * CONNECTION-LEVEL transient failures only (lost API connection / network blip /
+ * server-unreachable 5xx). Mirrors runner.ts INFRA_RE. NARROW by design: it must
+ * not swallow genuine quota/auth (QUOTA_AUTH_RE, tested FIRST) — a wifi hiccup or
+ * a 503 storm is the run not completing, not the task failing. The 5xx tokens are
+ * HTTP-context-anchored (preceded by status/code/HTTP/error or followed by a
+ * gateway/unavailable phrase) so a bare row count / assertion diff like
+ * 'Retrieved 502 rows' or 'expected 200 but got 503' in project output does NOT
+ * match. Classification reads stderr + the agent's final-message summary only —
+ * NEVER the raw `codex exec` transcript (which carries the project's own shell /
+ * build / test output and would mask real failures); see classifyExit + runTask.
+ */
+const INFRA_RE =
+  /unable to connect|connection refused|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|socket hang ?up|network (error|is unreachable)|client request timed out|(?:status|code|http|error)[^\n]{0,12}\b(?:502|503|504)\b|\b(?:502|503|504)\b\s*(?:bad gateway|service unavailable|gateway time-?out)|temporarily (unavailable|limiting)|service unavailable/i;
+
 // ---------------------------------------------------------------------------
 // Injectable deps (defaults touch the real system; tests override everything)
 // ---------------------------------------------------------------------------
@@ -155,18 +170,50 @@ export interface ExitClassification {
   timedOut: boolean;
   signal: NodeJS.Signals | string | null;
   exitCode: number | null;
-  /** Last ~16KB of combined stdout+stderr. */
-  outputTail: string;
-  /** Final agent message (summary). */
+  /**
+   * Last ~16KB of codex's OWN stderr (runtime errors). This is what infra/quota
+   * classification reads — NOT the stdout transcript. `codex exec` (no --json)
+   * streams the agent transcript on stdout INCLUDING the output of every shell /
+   * build / test command the agent runs (the project's OWN output). Scanning that
+   * would misclassify a real task failure as 'infra' the moment a legitimate test
+   * prints a connection-level token (a 5xx assertion, a row count, ETIMEDOUT in a
+   * network test, even a test NAMED 'handles connection refused'), refunding the
+   * attempt and looping forever instead of blocking. So we mirror the claude path:
+   * classify from stderr + the agent's final-message summary only.
+   */
+  stderrTail: string;
+  /** Final agent message (summary) — the agent's own envelope text, not the transcript. */
   summary: string;
 }
 
-/** Pure outcome classification for a finished `codex exec` process. */
+/**
+ * Pure outcome classification for a finished `codex exec` process.
+ *
+ * PRECEDENCE (mirrors runner.ts classifyClaudeOutcome):
+ *   1. our wall-clock timeout → 'timeout'
+ *   2. our-own SIGTERM/SIGKILL → 'killed'
+ * (1)–(2) are OUR deliberate stops and outrank infra/quota. On a nonzero exit we
+ * read codex's stderr + the agent summary ONLY (never the stdout transcript — see
+ * ExitClassification.stderrTail). INFRA_RE and QUOTA_AUTH_RE are NOT disjoint for
+ * real strings (providers serve rate-limit/overload/auth-expiry AS HTTP 5xx), so:
+ *   3. genuine quota/auth QUOTA_AUTH_RE → 'quota'  (tested FIRST — a message that
+ *      names usage-limit/quota/401/not-logged-in/expiry IS quota even when it also
+ *      carries a 5xx; it must feed the quota/reset accounting, not be refunded
+ *      forever as a transient blip)
+ *   4. CONNECTION-LEVEL INFRA_RE → 'infra'  (only when NO quota/auth token is
+ *      present — a pure ConnectionRefused / socket hang up / gateway 5xx is a
+ *      transient blip; the run did not complete, so the dispatcher refunds the
+ *      attempt and never blocks)
+ *   5. otherwise → 'error'
+ * A clean exit 0 is NEVER infra (HARD_LIMIT_RE → 'quota', else completed-pending-judge).
+ */
 export function classifyExit(c: ExitClassification): RunOutcome {
   if (c.timedOut) return 'timeout';
   if (c.signal !== null && c.signal !== undefined) return 'killed';
   if (c.exitCode !== 0) {
-    return QUOTA_AUTH_RE.test(c.outputTail) || QUOTA_AUTH_RE.test(c.summary) ? 'quota' : 'error';
+    if (QUOTA_AUTH_RE.test(c.stderrTail) || QUOTA_AUTH_RE.test(c.summary)) return 'quota';
+    if (INFRA_RE.test(c.stderrTail) || INFRA_RE.test(c.summary)) return 'infra';
+    return 'error';
   }
   if (HARD_LIMIT_RE.test(c.summary)) return 'quota';
   // Clean completion = completed-pending-judge; the claude-side judge promotes to 'passed'.
@@ -446,17 +493,20 @@ export function codexAdapter(config: SurplusConfig, deps: CodexAdapterDeps = {})
         // argv array, NO shell — nothing is shell-interpolated.
       });
 
-      let outputTail = '';
-      const appendTail = (chunk: Buffer | string): void => {
-        outputTail = (outputTail + chunk.toString()).slice(-OUTPUT_TAIL_BYTES);
-      };
+      // SEPARATE buffers: stdout carries the agent transcript (which streams the
+      // project's OWN shell/build/test output) and is used ONLY for the summary
+      // fallback; stderr carries codex's runtime errors and is the ONLY stream
+      // fed to infra/quota classification (mirrors the claude path's stderrTail).
+      // Scanning the combined transcript would mask real task failures as 'infra'.
+      let stdoutTail = '';
+      let stderrTail = '';
       child.stdout?.on('data', (chunk: Buffer) => {
         redactedLog.write(chunk.toString('utf8'));
-        appendTail(chunk);
+        stdoutTail = (stdoutTail + chunk.toString()).slice(-OUTPUT_TAIL_BYTES);
       });
       child.stderr?.on('data', (chunk: Buffer) => {
         redactedLog.write(chunk.toString('utf8'));
-        appendTail(chunk);
+        stderrTail = (stderrTail + chunk.toString()).slice(-OUTPUT_TAIL_BYTES);
       });
       if (child.stdin) {
         child.stdin.on('error', () => {
@@ -526,13 +576,18 @@ export function codexAdapter(config: SurplusConfig, deps: CodexAdapterDeps = {})
       redactedLog.flush();
       await new Promise<void>((resolve) => logStream.end(resolve));
 
-      let summary = '';
+      // finalMessage is the agent's OWN envelope text (--output-last-message);
+      // it is the only summary text classification may read. The DISPLAY summary
+      // falls back to the stdout transcript when codex wrote no final message, but
+      // that transcript carries the project's command output and must NOT reach
+      // classifyExit (it would mask real failures as 'infra' — see ExitClassification).
+      let finalMessage = '';
       try {
-        summary = (await readFile(lastMessagePath, 'utf8')).trim();
+        finalMessage = (await readFile(lastMessagePath, 'utf8')).trim();
       } catch {
         /* codex did not write a final message */
       }
-      if (!summary) summary = outputTail.slice(-2000).trim();
+      let summary = finalMessage || stdoutTail.slice(-2000).trim();
       summary = redactSecrets(summary);
 
       const outcome = watchdogAborted
@@ -541,8 +596,10 @@ export function codexAdapter(config: SurplusConfig, deps: CodexAdapterDeps = {})
             timedOut,
             signal: exit.signal,
             exitCode: exit.code,
-            outputTail,
-            summary,
+            // stderr + the agent's own final message ONLY — never the stdout
+            // transcript (which carries the project's shell/build/test output).
+            stderrTail,
+            summary: redactSecrets(finalMessage),
           });
 
       return {

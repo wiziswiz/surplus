@@ -18,6 +18,16 @@ import { sanitizeAccountKey } from './config.js';
 import { buildGoalCondition, redactSecrets } from './vision.js';
 
 const QUOTA_RE = /rate.?limit|quota|overloaded|401|authentication|expired/i;
+// CONNECTION-LEVEL transient failures only (lost API connection / network blip /
+// server-unreachable 5xx). Deliberately NARROW: it must NOT swallow genuine
+// quota/auth (handled by QUOTA_RE) — see classifyClaudeOutcome's commented
+// precedence (QUOTA_RE is tested FIRST so a 5xx that NAMES rate-limit/quota/auth
+// stays 'quota'). A lost wifi link or a 503 storm is the run not completing.
+// The 5xx tokens are HTTP-context-anchored (preceded by status/code/HTTP/error or
+// followed by a gateway/unavailable phrase) so a bare row count / assertion diff
+// like 'Retrieved 502 rows' or 'expected 200 but got 503' does NOT match.
+const INFRA_RE =
+  /unable to connect|connection refused|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|socket hang ?up|network (error|is unreachable)|client request timed out|(?:status|code|http|error)[^\n]{0,12}\b(?:502|503|504)\b|\b(?:502|503|504)\b\s*(?:bad gateway|service unavailable|gateway time-?out)|temporarily (unavailable|limiting)|service unavailable/i;
 const HEARTBEAT_MS = 3 * 60_000;
 const KILL_GRACE_MS = 30_000;
 const STDOUT_KEEP = 4 * 1024 * 1024; // tail kept in memory for JSON parsing
@@ -104,6 +114,80 @@ export function parseClaudeEnvelope(stdout: string): ClaudeJsonEnvelope {
 
 function tail(text: string, n: number): string {
   return text.length > n ? text.slice(-n) : text;
+}
+
+export interface ClaudeOutcomeInputs {
+  /** True when the reserve usage-watchdog SIGTERM'd the worker. */
+  watchdogAborted: boolean;
+  /** True when our wall-clock timeout SIGTERM'd the worker. */
+  timedOut: boolean;
+  /** Non-null when the child failed to spawn at all. */
+  spawnError: Error | null;
+  /** Process exit code (null on spawn error / signal kill). */
+  code: number | null;
+  /** Terminating signal, if any (e.g. our own SIGTERM/SIGKILL on pause). */
+  signal: NodeJS.Signals | null;
+  /** `is_error` flag from the claude JSON envelope (null when absent). */
+  isError: boolean | null;
+  /** Last ~16KB of stderr. */
+  stderrTail: string;
+  /** The computed run summary (result text / diagnostics). */
+  summary: string;
+}
+
+/**
+ * Pure outcome classification for a finished `claude -p` run (exported for tests;
+ * mirrors providers/codex.ts classifyExit). PRECEDENCE, explicit & ordered:
+ *   1. watchdogAborted → 'quota'   (our reserve watchdog SIGTERM)
+ *   2. timedOut        → 'timeout' (our wall-clock SIGTERM)
+ *   3. our-own SIGTERM/SIGKILL (no wall/watchdog) → 'killed' (user pause)
+ * (1)–(3) are OUR deliberate stops and outrank both infra and quota: a run we
+ * killed didn't "fail to connect". A clean exit 0 is NEVER infra (it's
+ * completed-pending-judge 'failed', or 'error' when the CLI flagged is_error).
+ * Only when the run would OTHERWISE be 'error' (spawn failure / nonzero exit /
+ * is_error) do we read the text. INFRA_RE and QUOTA_RE are NOT disjoint for real
+ * strings (providers serve rate-limit/overload/auth-expiry AS HTTP 5xx), so:
+ *   4. genuine quota/auth QUOTA_RE → 'quota'  (tested FIRST — a message that names
+ *      rate-limit/quota/401/auth/expiry IS quota even when it also carries a 5xx;
+ *      it must feed the quota/reset accounting and block on persistent auth,
+ *      not be refunded forever as a transient blip)
+ *   5. CONNECTION-LEVEL INFRA_RE → 'infra'  (only when NO quota/auth token is
+ *      present — a pure ConnectionRefused / socket hang up / gateway 5xx is a
+ *      transient blip; the run did not complete, so the dispatcher refunds the
+ *      attempt and never blocks)
+ *   6. otherwise → 'error'
+ */
+export function classifyClaudeOutcome(c: ClaudeOutcomeInputs): RunOutcome {
+  let outcome: RunOutcome;
+  if (c.watchdogAborted) {
+    outcome = 'quota'; // reserve ceiling crossed mid-run
+  } else if (c.timedOut) {
+    outcome = 'timeout';
+  } else if (c.spawnError !== null) {
+    outcome = 'error';
+  } else if (c.code === 0) {
+    outcome = c.isError === true ? 'error' : 'failed';
+  } else if (c.signal === 'SIGTERM' || c.signal === 'SIGKILL') {
+    outcome = 'killed'; // external stop (user pause / system)
+  } else {
+    outcome = 'error';
+  }
+
+  // PRECEDENCE on the text (see doc comment): QUOTA_RE is tested BEFORE INFRA_RE.
+  // The two are NOT disjoint for realistic strings — providers serve rate-limit /
+  // overload / auth-expiry as HTTP 5xx ("HTTP 503: rate limit exceeded",
+  // "overloaded_error: 503"). A message that NAMES rate-limit/quota/401/auth/expiry
+  // is genuine quota even when it also carries a 5xx, so it must feed the quota /
+  // reset accounting (and BLOCK on a persistent auth failure) rather than being
+  // refunded forever as 'infra'. INFRA only fires when NO quota/auth token is
+  // present — a pure connection blip.
+  const quotaText = QUOTA_RE.test(c.stderrTail) || QUOTA_RE.test(c.summary);
+  if ((outcome === 'error' || outcome === 'killed') && quotaText) {
+    outcome = 'quota';
+  } else if (outcome === 'error' && (INFRA_RE.test(c.stderrTail) || INFRA_RE.test(c.summary))) {
+    outcome = 'infra';
+  }
+  return outcome;
 }
 
 function errMessage(err: unknown): string {
@@ -608,30 +692,18 @@ function runClaudeGoal(opts: {
       }
       summary = redactSecrets(summary);
 
-      let outcome: RunOutcome;
-      if (watchdogAborted) {
-        outcome = 'quota'; // reserve ceiling crossed mid-run
-      } else if (timedOut) {
-        outcome = 'timeout';
-      } else if (spawnError !== null) {
-        outcome = 'error';
-      } else if (code === 0) {
-        // Clean completion = 'failed' (completed, pending judge) by convention,
-        // unless the CLI itself flagged an error.
-        outcome = envelope.isError === true ? 'error' : 'failed';
-      } else if (signal === 'SIGTERM' || signal === 'SIGKILL') {
-        outcome = 'killed'; // external stop (user pause / system)
-      } else {
-        outcome = 'error';
-      }
-
-      // Quota/auth exhaustion detection (stderr or result text).
-      if (
-        (outcome === 'error' || outcome === 'killed') &&
-        (QUOTA_RE.test(stderrTail) || QUOTA_RE.test(summary))
-      ) {
-        outcome = 'quota';
-      }
+      // See classifyClaudeOutcome for the full, commented precedence
+      // (our-stops > infra(connection-level) > quota(auth) > error; exit 0 never infra).
+      const outcome = classifyClaudeOutcome({
+        watchdogAborted,
+        timedOut,
+        spawnError,
+        code,
+        signal,
+        isError: envelope.isError,
+        stderrTail,
+        summary,
+      });
 
       redactedLog.flush();
       log.end();

@@ -651,6 +651,79 @@ describe('dispatchTick', () => {
     expect(last.reason).toContain('respawn guard: claude');
   });
 
+  it('infra outcome: requeues to ready (never blocked) even at maxAttempts, refunds the attempt, skips the judge, and halts the tick', async () => {
+    const p = makeProject('pa');
+    const q = makeProject('pb');
+    // t1 starts at maxAttempts-1 so the claim pre-increment pushes it to MAX:
+    // a merit failure here would block — an infra blip must NOT.
+    const t1 = db.createTask({
+      projectId: p.id,
+      title: 'first',
+      status: 'ready',
+      priority: 1,
+      maxAttempts: 2,
+      attempts: 1,
+    });
+    const t2 = db.createTask({ projectId: q.id, title: 'second', status: 'ready', priority: 2 });
+    let judgeCalls = 0;
+    const ranOn: string[] = [];
+    const deps = makeDeps({
+      accounts: [
+        fakeAccount('claude', (args) => {
+          ranOn.push(args.task.id);
+          return makeRunnerResult({
+            outcome: 'infra',
+            summary: 'API Error: Unable to connect to API (ConnectionRefused)',
+            exitCode: 1,
+          });
+        }),
+      ],
+      judgeRun: async () => {
+        judgeCalls += 1;
+        return { score: 5, reasons: '', missing: '' };
+      },
+    });
+
+    const res = await dispatchTick(deps);
+
+    // Stopped after the first run even though t2 (and t1 again) were claimable.
+    expect(res.launched).toBe(1);
+    expect(res.results).toEqual([{ taskId: t1.id, provider: 'claude', outcome: 'infra' }]);
+    expect(ranOn).toEqual([t1.id]); // t2 never claimed in the same tick
+    expect(judgeCalls).toBe(0); // judge skipped — nothing completed
+
+    const after1 = db.getTask(t1.id)!;
+    // NEVER blocked, even though the claim pushed attempts to maxAttempts.
+    expect(after1.status).toBe('ready');
+    // Attempt refunded: back to its pre-run value (1), not the post-claim 2.
+    expect(after1.attempts).toBe(1);
+
+    const after2 = db.getTask(t2.id)!;
+    expect(after2.status).toBe('ready');
+    expect(after2.attempts).toBe(0); // never claimed
+
+    const run = db.listRunsForTask(t1.id)[0]!;
+    expect(run.outcome).toBe('infra');
+    expect(run.judgeScore).toBeNull();
+
+    // A run-finished event reflects the infra outcome (board visibility).
+    const finished = db
+      .listEventsAfter(0, 1000)
+      .filter((e) => e.type === 'run-finished')
+      .map((e) => JSON.parse(e.data) as { outcome?: string });
+    expect(finished.at(-1)!.outcome).toBe('infra');
+
+    // The tick halted via a 'decision' stop event naming the unreachable API.
+    const decisions = db
+      .listEventsAfter(0, 1000)
+      .filter((e) => e.type === 'decision')
+      .map((e) => JSON.parse(e.data) as { action: string; reason: string });
+    const last = decisions[decisions.length - 1]!;
+    expect(last.action).toBe('stop');
+    expect(last.reason).toContain('infra error');
+    expect(last.reason).toContain('will retry next tick');
+  });
+
   it('forceProvider without a taskId is one-shot: launches exactly one task', async () => {
     const pa = makeProject('pa');
     const pb = makeProject('pb');

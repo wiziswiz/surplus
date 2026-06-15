@@ -195,7 +195,7 @@ export interface RunDto {
   provider: Provider | null;
   startedAt: number;
   endedAt: number | null;
-  outcome: 'passed' | 'failed' | 'error' | 'timeout' | 'quota' | 'killed' | null;
+  outcome: 'passed' | 'failed' | 'error' | 'timeout' | 'quota' | 'killed' | 'infra' | null;
   exitCode: number | null;
   branch: string | null;
   summary: string | null;
