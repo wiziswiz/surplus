@@ -88,10 +88,22 @@ describe('projects and tasks', () => {
     expect(t.maxAttempts).toBe(3);
     expect(t.provider).toBe('any');
     expect(t.judgeFeedback).toBeNull();
+    expect(t.consecutiveInfra).toBe(0);
     const events = db.listEventsAfter(0);
     const created = events.filter((e) => e.type === 'task-created');
     expect(created).toHaveLength(1);
     expect(created[0]!.taskId).toBe(t.id);
+  });
+
+  it('round-trips consecutiveInfra (infra-streak counter) through updateTask/getTask', () => {
+    const p = makeProject();
+    const t = db.createTask({ projectId: p.id, title: 'flaky' });
+    expect(t.consecutiveInfra).toBe(0);
+    db.updateTask(t.id, { consecutiveInfra: 2 });
+    expect(db.getTask(t.id)!.consecutiveInfra).toBe(2);
+    // reset back to 0 (as a non-infra outcome would)
+    db.updateTask(t.id, { consecutiveInfra: 0 });
+    expect(db.getTask(t.id)!.consecutiveInfra).toBe(0);
   });
 
   it('updateTask bumps updated_at and appends task-updated vs status-changed', () => {

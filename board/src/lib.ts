@@ -87,10 +87,14 @@ export function providerTint(pref: ProviderPref): string {
   return pref === 'any' ? TINT.any : TINT[providerOfPref(pref)];
 }
 
+// Codex slugs as exposed by the current codex CLI (`codex debug models`).
+// codex-auto-review is intentionally excluded — it's a review-only model, not a
+// general task worker. TODO: source this list dynamically from `codex debug
+// models` so it can't rot again (the gpt-5.1-* slugs it replaced are now dead).
 export const MODEL_OPTIONS: Record<Provider | 'any', string[]> = {
   claude: ['fable', 'opus', 'sonnet', 'haiku'],
-  codex: ['gpt-5.1-codex', 'gpt-5.1-codex-mini', 'gpt-5.1'],
-  any: ['fable', 'opus', 'sonnet', 'haiku', 'gpt-5.1-codex', 'gpt-5.1-codex-mini'],
+  codex: ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.3-codex-spark'],
+  any: ['fable', 'opus', 'sonnet', 'haiku', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini'],
 };
 
 /** Model picker options for any affinity pref ('claude:<id>' → claude models). */

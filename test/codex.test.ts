@@ -192,10 +192,12 @@ describe('classifyExit', () => {
     ]) {
       expect(classifyExit({ ...base, exitCode: 1, stderrTail: text })).toBe('infra');
     }
-    // Matches in the summary (agent final message) too.
+    // But a connection error in the SUMMARY (agent-authored final message) with
+    // clean CLI stderr is NOT infra — it's the project's own failure narrated by
+    // the agent, and must not be refunded/looped forever.
     expect(
-      classifyExit({ ...base, exitCode: 1, summary: 'connection refused', stderrTail: '' }),
-    ).toBe('infra');
+      classifyExit({ ...base, exitCode: 1, summary: 'connection refused by my local postgres', stderrTail: '' }),
+    ).toBe('error');
   });
 
   it('infra is for a PURE connection failure (no quota/auth token) on nonzero exit', () => {

@@ -42,7 +42,7 @@ describe('defaultConfig', () => {
     });
     expect(c.providers.codex).toEqual({
       enabled: false,
-      defaults: { model: 'gpt-5.1-codex', effort: 'high' },
+      defaults: { model: 'gpt-5.5', effort: 'high' },
       weeklyResetFallback: null,
     });
     expect(c.modes.weeklySurplus).toEqual({ enabled: true, burnWindowHours: 12, stopAtPct: 95 });
@@ -117,7 +117,7 @@ describe('loadConfig', () => {
     expect(c.modes.weeklySurplus.stopAtPct).toBe(80);
     expect(c.board.port).toBe(5555);
     // Sibling defaults survive at every depth.
-    expect(c.providers.codex.defaults).toEqual({ model: 'gpt-5.1-codex', effort: 'high' });
+    expect(c.providers.codex.defaults).toEqual({ model: 'gpt-5.5', effort: 'high' });
     expect(c.providers.claude.enabled).toBe(true);
     expect(c.modes.weeklySurplus.enabled).toBe(true);
     expect(c.modes.weeklySurplus.burnWindowHours).toBe(12);
@@ -131,6 +131,26 @@ describe('loadConfig', () => {
       JSON.stringify({ providers: { codex: { weeklyResetFallback: 'Thu 21:00' } } }),
     );
     expect(loadConfig(tmp).providers.codex.weeklyResetFallback).toBe('Thu 21:00');
+  });
+
+  it('coerces a retired codex model slug to the current default, warning on stderr', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    writeFileSync(
+      configPath(tmp),
+      JSON.stringify({ providers: { codex: { defaults: { model: 'gpt-5.1-codex' } } } }),
+    );
+    const c = loadConfig(tmp);
+    expect(c.providers.codex.defaults.model).toBe('gpt-5.5');
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('gpt-5.1-codex'));
+    warn.mockRestore();
+  });
+
+  it('leaves a still-valid codex model slug untouched', () => {
+    writeFileSync(
+      configPath(tmp),
+      JSON.stringify({ providers: { codex: { defaults: { model: 'gpt-5.4' } } } }),
+    );
+    expect(loadConfig(tmp).providers.codex.defaults.model).toBe('gpt-5.4');
   });
 
   it('falls back to defaults on malformed JSON, warning on stderr', () => {

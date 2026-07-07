@@ -324,7 +324,8 @@ task  >  VISION.md frontmatter  >  project  >  config provider defaults
 
 Claude models: `opus` \| `sonnet` \| `haiku`; claude effort: `low` \|
 `medium` \| `high` \| `xhigh` \| `max`. Codex takes its own model ids (e.g.
-`gpt-5.1-codex`) and reasoning-effort strings. The judge model is configured
+`gpt-5.5`; run `codex debug models` for the current list) and reasoning-effort
+strings. The judge model is configured
 separately (`judge.model`) and always runs on claude.
 
 ## Safety
@@ -396,7 +397,7 @@ example (strip comments; the real file is plain JSON):
     "codex": {
       "enabled": false,             // opt in to burning ChatGPT quota
       "defaults": {
-        "model": "gpt-5.1-codex",   // codex CLI model id
+        "model": "gpt-5.5",         // codex CLI model id (`codex debug models`)
         "effort": "high"            // codex reasoning effort
       },
       // When the codex CLI doesn't expose live usage: a known weekly reset,

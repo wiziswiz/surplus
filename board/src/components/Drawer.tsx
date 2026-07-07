@@ -165,11 +165,18 @@ export function Drawer({
                     className={SELECT_CLS}
                   >
                     <option value="">default{defaults ? ` (${defaults.model})` : ''}</option>
-                    {modelOptionsFor(task.provider).map((m) => (
-                      <option key={m} value={m}>
-                        {m}
-                      </option>
-                    ))}
+                    {(() => {
+                      // Preserve a current value (e.g. an old/hand-edited slug) that
+                      // isn't in the option list, so it renders instead of a blank select.
+                      const opts = modelOptionsFor(task.provider);
+                      const cur = task.model ?? '';
+                      const list = cur && !opts.includes(cur) ? [cur, ...opts] : opts;
+                      return list.map((m) => (
+                        <option key={m} value={m}>
+                          {m}
+                        </option>
+                      ));
+                    })()}
                   </select>
                 </label>
                 <label className="flex flex-col gap-1 text-[11px] text-faint">

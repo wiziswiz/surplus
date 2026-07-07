@@ -212,7 +212,11 @@ export function classifyExit(c: ExitClassification): RunOutcome {
   if (c.signal !== null && c.signal !== undefined) return 'killed';
   if (c.exitCode !== 0) {
     if (QUOTA_AUTH_RE.test(c.stderrTail) || QUOTA_AUTH_RE.test(c.summary)) return 'quota';
-    if (INFRA_RE.test(c.stderrTail) || INFRA_RE.test(c.summary)) return 'infra';
+    // INFRA is classified from the codex-CLI-owned stderr ONLY. The agent's
+    // final-message summary is worker-authored (PROMPT_PREFACE even tells it to
+    // "show their output"), so a project's own ECONNREFUSED / 5xx narrated there
+    // must NOT flip a genuine failure to 'infra' and get refunded forever.
+    if (INFRA_RE.test(c.stderrTail)) return 'infra';
     return 'error';
   }
   if (HARD_LIMIT_RE.test(c.summary)) return 'quota';

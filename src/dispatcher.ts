@@ -83,6 +83,15 @@ const JUDGE_SKIP: ReadonlySet<RunOutcome> = new Set([
   'infra', // transient API-unreachable blip — there is nothing to judge
 ]);
 
+/**
+ * Max CONSECUTIVE 'infra' outcomes that get the attempt refunded before we stop
+ * refunding and let the run count toward maxAttempts. Bounds token/churn cost: a
+ * genuinely-unreachable API fails fast (~0 tokens), but a persistently broken
+ * network — or a misclassified failure — must not retry-zombie a full session
+ * every tick forever, never blocking. Reset to 0 on any non-infra outcome.
+ */
+const INFRA_STREAK_CAP = 3;
+
 const AUTH_ERROR_RE = /quota|rate.?limit|401|authentication|expired/i;
 
 const FEEDBACK_CAP = 4000;
@@ -405,26 +414,44 @@ async function runOne(
   // Status transition.
   const fresh = db.getTask(task.id) ?? task;
   if (passed) {
-    db.updateTask(task.id, { status: 'done', judgeFeedback: null });
+    db.updateTask(task.id, { status: 'done', judgeFeedback: null, consecutiveInfra: 0 });
     log(`dispatch: task ${task.id} done (judge ${verdict!.score}/5)`);
   } else if (result.outcome === 'infra') {
     // Transient infra error (lost API connection / network blip / server 5xx):
-    // the run DID NOT COMPLETE — this is not the task failing. Mirror the quota
-    // refund (the claim-time attempt increment is undone) and ALWAYS requeue to
-    // 'ready' — NEVER 'blocked', even if attempts were already at max. A single
-    // wifi hiccup must never permanently block good work. The tick also halts
-    // below (respawn-guard style), so retries are naturally rate-limited to one
-    // per tick (~15 min) — no immediate re-run into an unreachable API.
+    // the run DID NOT COMPLETE — this is not the task failing. Refund the
+    // claim-time attempt increment and requeue to 'ready' so a single wifi hiccup
+    // never permanently blocks good work. The tick also halts below (respawn-guard
+    // style), so retries are rate-limited to one per tick (~15 min).
+    //
+    // BUT bound the churn: after INFRA_STREAK_CAP consecutive infra outcomes, stop
+    // refunding and let the attempt stand so maxAttempts eventually blocks —
+    // otherwise a persistently broken network (or a misclassified failure) would
+    // retry-zombie a full session every tick forever.
     const reason = redact((result.summary ?? '').split('\n')[0] ?? '').slice(0, 160) || 'API unreachable';
-    db.updateTask(task.id, {
-      status: 'ready',
-      attempts: Math.max(0, fresh.attempts - 1),
-      judgeFeedback: buildFeedback(verdict, result, fresh.judgeFeedback),
-    });
-    log(
-      `dispatch: task ${task.id} requeued (infra error, attempt refunded — run did not ` +
-        `complete; not counted; reason: ${reason})`,
-    );
+    const streak = (fresh.consecutiveInfra ?? 0) + 1;
+    if (streak >= INFRA_STREAK_CAP) {
+      const blocked = fresh.attempts >= fresh.maxAttempts;
+      db.updateTask(task.id, {
+        status: blocked ? 'blocked' : 'ready',
+        consecutiveInfra: streak,
+        judgeFeedback: buildFeedback(verdict, result, fresh.judgeFeedback),
+      });
+      log(
+        `dispatch: task ${task.id} ${blocked ? 'blocked' : 'requeued'} (infra streak ${streak} ` +
+          `≥ cap ${INFRA_STREAK_CAP} — attempt now counted ${fresh.attempts}/${fresh.maxAttempts}; reason: ${reason})`,
+      );
+    } else {
+      db.updateTask(task.id, {
+        status: 'ready',
+        attempts: Math.max(0, fresh.attempts - 1),
+        consecutiveInfra: streak,
+        judgeFeedback: buildFeedback(verdict, result, fresh.judgeFeedback),
+      });
+      log(
+        `dispatch: task ${task.id} requeued (infra error, attempt refunded — run did not ` +
+          `complete; streak ${streak}/${INFRA_STREAK_CAP}; reason: ${reason})`,
+      );
+    }
   } else {
     // Non-merit interruptions (reserve-watchdog/quota stops, user pause)
     // refund the claim-time attempt increment: the watchdog is DESIGNED to
@@ -436,6 +463,7 @@ async function runOne(
     db.updateTask(task.id, {
       status: blocked ? 'blocked' : 'ready',
       ...(interrupted ? { attempts: Math.max(0, fresh.attempts - 1) } : {}),
+      consecutiveInfra: 0,
       judgeFeedback: buildFeedback(verdict, result, fresh.judgeFeedback),
     });
     log(

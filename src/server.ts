@@ -153,6 +153,24 @@ function isTaskStatus(v: unknown): v is TaskStatus {
   return typeof v === 'string' && (TASK_STATUSES as readonly string[]).includes(v);
 }
 
+const LOOPBACK_HOSTNAMES = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
+
+/** True when a Host header ('127.0.0.1:4242', 'localhost', '[::1]:4242') is loopback. */
+export function isLoopbackHost(host: string): boolean {
+  const h = host.trim().toLowerCase();
+  const name = h.startsWith('[') ? h.slice(0, h.indexOf(']') + 1) : h.split(':')[0];
+  return LOOPBACK_HOSTNAMES.has(name);
+}
+
+/** True when an Origin header ('http://localhost:4242') resolves to a loopback host. */
+export function isLoopbackOrigin(origin: string): boolean {
+  try {
+    return LOOPBACK_HOSTNAMES.has(new URL(origin).hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
 /** Strip anything that looks like a credential from error text. */
 export function redact(text: string): string {
   return text
@@ -538,6 +556,34 @@ export function applyConfigPatch(base: SurplusConfig, patch: ConfigPatch): Surpl
 export async function startServer(opts: StartServerOptions): Promise<void> {
   const { db, config, accounts, decideFn, paused, setPaused, deps } = opts;
   const app = new Hono();
+
+  // --- localhost trust boundary: CSRF + DNS-rebinding defense ----------------
+  // This server has no auth and CAN trigger code execution (burn). Its only
+  // boundary is the 127.0.0.1 bind, which a browser can still cross two ways:
+  //   1. CSRF — a page the user visits can POST here; CORS "simple requests"
+  //      (form / text-plain fetch) send NO preflight, so the side effect fires
+  //      even though the response is unreadable.
+  //   2. DNS rebinding — an attacker domain re-pointed at 127.0.0.1 becomes
+  //      "same-origin", unlocking the PATCH/PUT/DELETE routes and readable data.
+  // Defense (no impact on the board or non-browser clients):
+  //   - Reject any request whose Host header is not loopback  → kills rebinding.
+  //   - Reject any state-changing (non-GET) request that carries a non-loopback
+  //     Origin → kills cross-site CSRF. Browsers always send Origin on non-GET
+  //     cross-origin requests; the CLI / tray / tests omit it and pass through.
+  app.use('*', async (c, next) => {
+    const host = c.req.header('host');
+    if (host !== undefined && !isLoopbackHost(host)) {
+      return c.json({ error: 'forbidden: non-loopback Host header' }, 403);
+    }
+    const method = c.req.method;
+    if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
+      const origin = c.req.header('origin');
+      if (origin !== undefined && !isLoopbackOrigin(origin)) {
+        return c.json({ error: 'forbidden: cross-origin request refused' }, 403);
+      }
+    }
+    return next();
+  });
 
   /**
    * Error text when a 'claude:<id>' affinity names no configured account

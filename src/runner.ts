@@ -17,7 +17,7 @@ import type { RunOutcome, RunnerResult, RunTaskArgs, TaskRow } from './types.js'
 import { sanitizeAccountKey } from './config.js';
 import { buildGoalCondition, redactSecrets } from './vision.js';
 
-const QUOTA_RE = /rate.?limit|quota|overloaded|401|authentication|expired/i;
+const QUOTA_RE = /rate.?limit|quota|overloaded|\b429\b|401|authentication|expired/i;
 // CONNECTION-LEVEL transient failures only (lost API connection / network blip /
 // server-unreachable 5xx). Deliberately NARROW: it must NOT swallow genuine
 // quota/auth (handled by QUOTA_RE) — see classifyClaudeOutcome's commented
@@ -28,6 +28,14 @@ const QUOTA_RE = /rate.?limit|quota|overloaded|401|authentication|expired/i;
 // like 'Retrieved 502 rows' or 'expected 200 but got 503' does NOT match.
 const INFRA_RE =
   /unable to connect|connection refused|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|socket hang ?up|network (error|is unreachable)|client request timed out|(?:status|code|http|error)[^\n]{0,12}\b(?:502|503|504)\b|\b(?:502|503|504)\b\s*(?:bad gateway|service unavailable|gateway time-?out)|temporarily (unavailable|limiting)|service unavailable/i;
+// The claude CLI reports its OWN transport failures in the result envelope with a
+// recognizable "API Error: … connect/network/5xx" or "unable to connect to … api"
+// shape. Only THAT narrow envelope is matched against `summary` (which is
+// otherwise WORKER-authored) — so a worker narrating a project's own ECONNREFUSED
+// (a Postgres/HTTP client in its tests) is NOT misread as 'infra' and refunded
+// forever. Raw errno tokens are trusted only from the CLI-owned stderr (INFRA_RE).
+const INFRA_ENVELOPE_RE =
+  /api (?:error|request)[^\n]{0,60}(?:unable to connect|connection (?:refused|error|reset)|econnrefused|enotfound|etimedout|network|timed out|502|503|504)|unable to connect to (?:the )?(?:anthropic )?api/i;
 const HEARTBEAT_MS = 3 * 60_000;
 const KILL_GRACE_MS = 30_000;
 const STDOUT_KEEP = 4 * 1024 * 1024; // tail kept in memory for JSON parsing
@@ -184,7 +192,7 @@ export function classifyClaudeOutcome(c: ClaudeOutcomeInputs): RunOutcome {
   const quotaText = QUOTA_RE.test(c.stderrTail) || QUOTA_RE.test(c.summary);
   if ((outcome === 'error' || outcome === 'killed') && quotaText) {
     outcome = 'quota';
-  } else if (outcome === 'error' && (INFRA_RE.test(c.stderrTail) || INFRA_RE.test(c.summary))) {
+  } else if (outcome === 'error' && (INFRA_RE.test(c.stderrTail) || INFRA_ENVELOPE_RE.test(c.summary))) {
     outcome = 'infra';
   }
   return outcome;

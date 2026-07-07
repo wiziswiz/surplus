@@ -1,11 +1,14 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
+import * as http from 'node:http';
 import * as path from 'node:path';
 import {
   applyConfigPatch,
   buildConfigPatch,
   buildTaskPatch,
+  isLoopbackHost,
+  isLoopbackOrigin,
   redact,
   slugifyProjectId,
   startServer,
@@ -151,6 +154,27 @@ describe('redact', () => {
     expect(redact('failed with sk-ant-abc123def456')).not.toContain('sk-ant-abc123def456');
     expect(redact('Authorization: Bearer abc.def.ghi')).not.toContain('abc.def.ghi');
     expect(redact('jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig')).not.toContain('eyJhbGci');
+  });
+});
+
+describe('loopback trust boundary (CSRF / rebinding guards)', () => {
+  it('accepts loopback Host headers (with or without port, ipv6)', () => {
+    for (const h of ['127.0.0.1:4242', 'localhost', 'localhost:4242', '127.0.0.1', '[::1]:4242']) {
+      expect(isLoopbackHost(h)).toBe(true);
+    }
+  });
+  it('rejects non-loopback Host headers (DNS-rebinding domains)', () => {
+    for (const h of ['evil.com', 'evil.com:4242', 'attacker.127.0.0.1.nip.io', '10.0.0.5:4242']) {
+      expect(isLoopbackHost(h)).toBe(false);
+    }
+  });
+  it('accepts loopback Origins and rejects cross-site / malformed ones', () => {
+    expect(isLoopbackOrigin('http://localhost:4242')).toBe(true);
+    expect(isLoopbackOrigin('http://127.0.0.1:4242')).toBe(true);
+    expect(isLoopbackOrigin('https://evil.com')).toBe(false);
+    expect(isLoopbackOrigin('http://127.0.0.1.evil.com')).toBe(false);
+    expect(isLoopbackOrigin('null')).toBe(false);
+    expect(isLoopbackOrigin('')).toBe(false);
   });
 });
 
@@ -389,6 +413,45 @@ describe('GET /api/state', () => {
     expect(decisions.codex).toBeUndefined();
     expect(state.paused).toBe(false);
     expect(state.running).toEqual([]);
+  });
+});
+
+describe('CSRF / rebinding middleware', () => {
+  it('refuses a state-changing POST carrying a cross-site Origin', async () => {
+    const res = await fetch(`${BASE}/api/pause`, {
+      method: 'POST',
+      headers: { origin: 'https://evil.com' },
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it('refuses any request with a non-loopback Host header (rebinding)', async () => {
+    // fetch()/undici auto-manages Host, so send a raw request that spoofs it.
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = http.request(
+        { host: '127.0.0.1', port: PORT, path: '/api/state', headers: { Host: 'evil.com' }, setHost: false },
+        (res) => {
+          res.resume();
+          resolve(res.statusCode ?? 0);
+        },
+      );
+      req.on('error', reject);
+      req.end();
+    });
+    expect(status).toBe(403);
+  });
+
+  it('allows a same-site (loopback) Origin on a state-changing POST', async () => {
+    const res = await fetch(`${BASE}/api/resume`, {
+      method: 'POST',
+      headers: { origin: BASE },
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it('allows a normal GET with no Origin (CLI / tray / server-to-server)', async () => {
+    const res = await fetch(`${BASE}/api/state`);
+    expect(res.status).toBe(200);
   });
 });
 

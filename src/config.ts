@@ -231,7 +231,7 @@ export function defaultConfig(): SurplusConfig {
       },
       codex: {
         enabled: false,
-        defaults: { model: 'gpt-5.1-codex', effort: 'high' },
+        defaults: { model: 'gpt-5.5', effort: 'high' },
         weeklyResetFallback: null,
       },
     },
@@ -317,13 +317,42 @@ export function loadConfig(dir?: string): SurplusConfig {
     if (!isPlainObject(parsed)) {
       throw new Error('config root is not a JSON object');
     }
-    return deepMerge(defaultConfig(), parsed);
+    return coerceRetiredCodexModel(deepMerge(defaultConfig(), parsed), file);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     // console.warn writes to stderr in Node.
     console.warn(`surplus: malformed config at ${file} — falling back to defaults (${msg})`);
     return defaultConfig();
   }
+}
+
+/**
+ * Codex model slugs retired from the codex CLI. surplus persists the FULL merged
+ * config on every Save, so an install that once chose a gpt-5.1-* slug keeps it
+ * forever — and `codex exec -m <dead-slug>` then fails at runtime, blocking the
+ * task with no hint why. Coerce a retired slug to the current default (loudly, so
+ * the user updates their file) rather than dead-slug every codex burn silently.
+ */
+const RETIRED_CODEX_MODELS: ReadonlySet<string> = new Set([
+  'gpt-5.1-codex',
+  'gpt-5.1-codex-mini',
+  'gpt-5.1',
+  'gpt-5-codex',
+  'gpt-5',
+]);
+
+function coerceRetiredCodexModel(cfg: SurplusConfig, file: string): SurplusConfig {
+  const current = cfg.providers.codex.defaults.model;
+  if (RETIRED_CODEX_MODELS.has(current)) {
+    const replacement = defaultConfig().providers.codex.defaults.model;
+    console.warn(
+      `surplus: codex model '${current}' is retired from the codex CLI — using ` +
+        `'${replacement}' instead. Update providers.codex.defaults.model in ${file} ` +
+        `(run 'codex debug models' for the current slugs).`,
+    );
+    cfg.providers.codex.defaults.model = replacement;
+  }
+  return cfg;
 }
 
 /** Write config as pretty JSON, creating the state dir lazily. */

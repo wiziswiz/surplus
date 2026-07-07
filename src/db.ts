@@ -74,6 +74,7 @@ export type TaskPatch = Partial<
     | 'judgeFeedback'
     | 'parentId'
     | 'scheduledAt'
+    | 'consecutiveInfra'
   >
 >;
 
@@ -199,7 +200,7 @@ function sanitizeId(id: string): string {
 // Schema (single-statement DDL run individually; user_version migration guard)
 // ---------------------------------------------------------------------------
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 const DDL_STATEMENTS: readonly string[] = [
   `CREATE TABLE IF NOT EXISTS projects (
@@ -227,6 +228,7 @@ const DDL_STATEMENTS: readonly string[] = [
     judge_feedback TEXT,
     parent_id      TEXT,
     scheduled_at   INTEGER,
+    consecutive_infra INTEGER NOT NULL DEFAULT 0,
     created_at     INTEGER NOT NULL,
     updated_at     INTEGER NOT NULL
   )`,
@@ -269,8 +271,24 @@ function migrate(db: Database.Database): void {
   }
   for (const stmt of DDL_STATEMENTS) db.prepare(stmt).run();
   if (current < SCHEMA_VERSION) {
-    // Future per-version ALTER migrations go here, gated on `current`.
+    // v2: consecutive-infra counter (bounds transient-error retry churn). Added
+    // idempotently — CREATE TABLE above already includes it for fresh DBs, so we
+    // only ALTER a pre-existing table that lacks the column.
+    addColumnIfMissing(db, 'tasks', 'consecutive_infra', 'INTEGER NOT NULL DEFAULT 0');
     db.pragma(`user_version = ${SCHEMA_VERSION}`);
+  }
+}
+
+/** ALTER TABLE … ADD COLUMN only when the column is absent (fresh DBs already have it). */
+function addColumnIfMissing(
+  db: Database.Database,
+  table: string,
+  column: string,
+  ddl: string,
+): void {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  if (!cols.some((c) => c.name === column)) {
+    db.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`).run();
   }
 }
 
@@ -304,6 +322,7 @@ interface TaskDbRow {
   judge_feedback: string | null;
   parent_id: string | null;
   scheduled_at: number | null;
+  consecutive_infra: number;
   created_at: number;
   updated_at: number;
 }
@@ -363,6 +382,7 @@ function mapTask(r: TaskDbRow): TaskRow {
     judgeFeedback: r.judge_feedback,
     parentId: r.parent_id,
     scheduledAt: r.scheduled_at,
+    consecutiveInfra: r.consecutive_infra,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
@@ -419,6 +439,7 @@ const TASK_PATCH_COLUMNS: Record<keyof TaskPatch & string, string> = {
   judgeFeedback: 'judge_feedback',
   parentId: 'parent_id',
   scheduledAt: 'scheduled_at',
+  consecutiveInfra: 'consecutive_infra',
 };
 
 const RUN_PATCH_COLUMNS: Record<keyof RunPatch & string, string> = {

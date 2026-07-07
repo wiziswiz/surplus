@@ -77,7 +77,9 @@ describe('classifyClaudeOutcome (infra vs quota vs error precedence)', () => {
         summary: 'Unable to connect to API (ConnectionRefused)',
       }),
     ).toBe('infra');
-    // Other connection-level signals also map to infra.
+    // Other connection-level signals also map to infra — but raw errno tokens are
+    // trusted only from the CLI-owned stderr stream (in `summary` they'd be the
+    // worker's own project output; see the regression test below).
     for (const text of [
       'request failed: ECONNREFUSED 127.0.0.1:443',
       'getaddrinfo ENOTFOUND api.anthropic.com',
@@ -85,11 +87,35 @@ describe('classifyClaudeOutcome (infra vs quota vs error precedence)', () => {
       'upstream error: 503 Service Unavailable',
       'network is unreachable',
     ]) {
-      expect(classifyClaudeOutcome({ ...base, code: 1, summary: text })).toBe('infra');
+      expect(classifyClaudeOutcome({ ...base, code: 1, stderrTail: text })).toBe('infra');
     }
-    // Matching in stderr (not just summary) works too.
     expect(
       classifyClaudeOutcome({ ...base, code: 1, stderrTail: 'connection refused', summary: 'x' }),
+    ).toBe('infra');
+  });
+
+  it("a worker NARRATING a project's own connection error is NOT infra (real failure)", () => {
+    // The bug this guards: a genuine merit failure whose final message describes
+    // the PROJECT's own network error must not be refunded forever as 'infra'.
+    // (Raw errno in the worker-authored summary, with clean CLI stderr.)
+    expect(
+      classifyClaudeOutcome({
+        ...base,
+        code: 1,
+        summary:
+          'could not finish: integration tests fail with ECONNREFUSED 127.0.0.1:5432 (Postgres not provisioned)',
+      }),
+    ).toBe('error');
+    expect(
+      classifyClaudeOutcome({
+        ...base,
+        code: 1,
+        summary: 'expected 200 but got ETIMEDOUT from the local test server',
+      }),
+    ).toBe('error');
+    // The CLI's OWN transport-failure envelope in summary DOES still count.
+    expect(
+      classifyClaudeOutcome({ ...base, code: 1, summary: 'API Error: Unable to connect to API' }),
     ).toBe('infra');
   });
 
@@ -132,10 +158,14 @@ describe('classifyClaudeOutcome (infra vs quota vs error precedence)', () => {
     expect(
       classifyClaudeOutcome({ ...base, code: 1, summary: 'processed 504 records, 0 failures' }),
     ).toBe('error');
-    // ...but a genuine gateway 5xx (HTTP-anchored / gateway phrase) IS infra.
+    // ...but a genuine gateway 5xx from the CLI-owned stderr stream IS infra.
+    expect(
+      classifyClaudeOutcome({ ...base, code: 1, stderrTail: 'HTTP 503 Service Unavailable from upstream' }),
+    ).toBe('infra');
+    // The same 5xx phrase in the worker's summary is NOT infra (it's project output).
     expect(
       classifyClaudeOutcome({ ...base, code: 1, summary: 'HTTP 503 Service Unavailable from upstream' }),
-    ).toBe('infra');
+    ).toBe('error');
   });
 
   it("a clean exit 0 is NEVER infra (completed-pending-judge 'failed')", () => {

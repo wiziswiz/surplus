@@ -109,7 +109,7 @@ export interface ClaudeAccountConfig {
 export interface ProviderConfig {
   enabled: boolean;
   defaults: {
-    /** claude: opus|sonnet|haiku. codex: e.g. 'gpt-5.1-codex'. */
+    /** claude: fable|opus|sonnet|haiku. codex: e.g. 'gpt-5.5' (see `codex debug models`). */
     model: string;
     /** claude: EffortLevel. codex: reasoning effort string. */
     effort: string;
@@ -272,6 +272,8 @@ export interface TaskRow {
   judgeFeedback: string | null;
   parentId: string | null;     // promoted to ready only when parent is done
   scheduledAt: number | null;  // skip until this ms epoch
+  /** Consecutive transient-'infra' outcomes; bounds retry churn, reset on any other outcome. */
+  consecutiveInfra?: number;
   createdAt: number;
   updatedAt: number;
 }
