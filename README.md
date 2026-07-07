@@ -346,8 +346,10 @@ separately (`judge.model`) and always runs on claude.
 - **Timeouts.** Every run has a hard wall-clock cap
   (`dispatcher.taskTimeoutMinutes`, default 90) and a suggested turn bound in
   the goal condition.
-- **Localhost-only board.** The board binds to localhost; there is no remote
-  surface.
+- **Localhost-only board, CSRF/rebinding-guarded.** The board binds to localhost
+  and additionally rejects any request with a non-loopback `Host` (blocks DNS
+  rebinding) and any state-changing request carrying a cross-site `Origin` (blocks
+  CSRF from a page you happen to visit). There is no remote surface.
 - **Tokens never logged.** The OAuth token is read at call time, held in
   memory, and redacted from any error text. Nothing secret is written to
   `~/.surplus` or the repo.
