@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   MAX_CLAUDE_ACCOUNTS,
+  addClaudeAccount,
   configPath,
   dbPath,
   defaultConfig,
@@ -94,6 +95,44 @@ describe('path helpers', () => {
     expect(existsSync(join(base, 'worktrees'))).toBe(true);
     // Idempotent.
     expect(() => ensureDirs(base)).not.toThrow();
+  });
+});
+
+describe('addClaudeAccount', () => {
+  it('appends a valid account (pinning nothing, tilde-form profile dir) and derives label', () => {
+    const { entry, config } = addClaudeAccount(defaultConfig(), '  Wiz-Main  '.toLowerCase().trim());
+    expect(entry).toEqual({
+      id: 'wiz-main',
+      label: 'wiz-main',
+      configDir: '~/.surplus/profiles/wiz-main',
+      priority: null,
+    });
+    const accounts = config.providers.claude.accounts!;
+    expect(accounts.map((a) => a.id)).toEqual(['main', 'wiz-main']);
+    // pure: the input config is not mutated
+    expect(defaultConfig().providers.claude.accounts).toHaveLength(1);
+  });
+
+  it('uses an explicit label when given', () => {
+    const { entry } = addClaudeAccount(defaultConfig(), 'work', { label: 'Work Max' });
+    expect(entry.label).toBe('Work Max');
+  });
+
+  it('rejects a pasted OAuth token with a specific message', () => {
+    expect(() => addClaudeAccount(defaultConfig(), 'sk-ant-oat01-Abc')).toThrow(/looks like an OAuth token/i);
+  });
+
+  it('rejects bad slugs, the reserved id, duplicates, and over-cap', () => {
+    expect(() => addClaudeAccount(defaultConfig(), 'Bad Slug')).toThrow(/invalid slug/i);
+    expect(() => addClaudeAccount(defaultConfig(), 'UPPER')).toThrow(/invalid slug/i);
+    expect(() => addClaudeAccount(defaultConfig(), 'main')).toThrow(/reserved/i);
+    const one = addClaudeAccount(defaultConfig(), 'a').config;
+    expect(() => addClaudeAccount(one, 'a')).toThrow(/already exists/i);
+    // fill to the cap (main + 5 = 6), then the next is rejected
+    let cfg = defaultConfig();
+    for (const id of ['a', 'b', 'c', 'd', 'e']) cfg = addClaudeAccount(cfg, id).config;
+    expect(cfg.providers.claude.accounts).toHaveLength(MAX_CLAUDE_ACCOUNTS);
+    expect(() => addClaudeAccount(cfg, 'f')).toThrow(new RegExp(`at most ${MAX_CLAUDE_ACCOUNTS}`));
   });
 });
 

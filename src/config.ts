@@ -75,6 +75,56 @@ export function defaultClaudeAccounts(): ClaudeAccountConfig[] {
   return [{ id: 'main', label: 'personal', configDir: null, priority: null }];
 }
 
+/**
+ * Validate a new claude-account slug and return the config with it appended, plus
+ * the derived entry. PURE — no filesystem writes (the caller mkdir's the profile
+ * dir and saves). Throws a user-facing message on any invalid/duplicate/over-cap
+ * slug (incl. the classic "pasted my token here" mistake).
+ */
+export function addClaudeAccount(
+  config: SurplusConfig,
+  slug: string,
+  opts?: { label?: string },
+): { entry: ClaudeAccountConfig; config: SurplusConfig } {
+  const id = slug.trim();
+  if (/^sk-ant/i.test(id)) {
+    throw new Error(
+      "that looks like an OAuth token — the account id is just a short nickname (e.g. 'wiz-main'). " +
+        'surplus never stores tokens: it signs you in through Claude Code and reads the ' +
+        'auto-refreshing credential at call time.',
+    );
+  }
+  if (!ACCOUNT_ID_RE.test(id)) {
+    throw new Error(`invalid slug '${id}' — use 1–24 lowercase letters, digits or dashes (e.g. 'wiz-main')`);
+  }
+  if (id === 'main') {
+    throw new Error("'main' is reserved for your default ~/.claude account — pick another slug");
+  }
+  const accounts = config.providers.claude.accounts ?? defaultClaudeAccounts();
+  if (accounts.some((a) => a.id === id)) {
+    throw new Error(`account '${id}' already exists`);
+  }
+  if (accounts.length >= MAX_CLAUDE_ACCOUNTS) {
+    throw new Error(`at most ${MAX_CLAUDE_ACCOUNTS} claude accounts`);
+  }
+  const entry: ClaudeAccountConfig = {
+    id,
+    label: opts?.label?.trim() || id,
+    configDir: `~/.surplus/profiles/${id}`,
+    priority: null,
+  };
+  return {
+    entry,
+    config: {
+      ...config,
+      providers: {
+        ...config.providers,
+        claude: { ...config.providers.claude, accounts: [...accounts, entry] },
+      },
+    },
+  };
+}
+
 /** One enumerated burnable account (config-level, not yet bound to a runner). */
 export interface ResolvedAccount {
   /** AccountKey: 'claude' (BACK-COMPAT for id 'main') | 'claude:<id>' | 'codex'. */

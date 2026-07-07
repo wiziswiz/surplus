@@ -237,14 +237,28 @@ and its own protected reserve.
 
 <img src="docs/accounts.png" alt="Settings → Claude accounts: account list with usage indicator and priority, plus the add-account form" width="700">
 
-Adding one takes a minute, and **no tokens are ever pasted or stored**:
+Adding one takes a minute, and **no tokens are ever pasted or stored**.
+
+**Fastest — one command:**
+
+```bash
+surplus account add work --label "Work Max"
+```
+
+It scaffolds the profile folder (`~/.surplus/profiles/work`), registers the
+account, and drops you straight into Claude Code's sign-in for it (`claude
+auth login`). Add `--no-login` to just scaffold and print the sign-in command
+to run yourself. The id is only a nickname — paste a token there and it tells
+you so.
+
+**Or from the board:**
 
 1. **Settings → Claude accounts → Add account** — pick a short id (`work`)
    and a label.
 2. Run the one-liner it shows you in Terminal —
-   `CLAUDE_CONFIG_DIR=~/.surplus/profiles/work claude` — and log in once
-   with that account. That's a standard Claude Code profile folder: Claude
-   Code keeps the login refreshed itself, forever.
+   `CLAUDE_CONFIG_DIR=~/.surplus/profiles/work claude auth login` — and log in
+   once with that account. That's a standard Claude Code profile folder:
+   Claude Code keeps the login refreshed itself, forever.
 3. Back in Settings, the account shows **usage ok** — done.
 
 **Which account burns first?** Auto mode by default: among accounts whose

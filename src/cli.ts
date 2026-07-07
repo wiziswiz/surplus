@@ -6,7 +6,8 @@
  * (so `surplus --help` stays pure).
  */
 import { Command, InvalidArgumentError, Option } from 'commander';
-import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 
@@ -33,6 +34,8 @@ import {
   isPaused,
   setPaused,
   configPath,
+  surplusDir,
+  addClaudeAccount,
   worktreesDir as worktreesDirPath,
 } from './config.js';
 import { decide } from './decide.js';
@@ -626,6 +629,55 @@ program
       console.log('Next steps:');
       console.log(`  surplus task create ${project.id} "Your first task"`);
       console.log('  surplus tick --dry-run');
+    }),
+  );
+
+// --- account -------------------------------------------------------------------
+
+const accountCmd = program
+  .command('account')
+  .description('Manage Claude accounts (extra subscriptions burned in parallel)');
+
+accountCmd
+  .command('add <slug>')
+  .description('Scaffold a Claude Code profile for an extra account and sign in to it')
+  .option('--label <label>', 'friendly display name (default: the slug)')
+  .option('--no-login', 'just scaffold + register; print the sign-in command instead of running it')
+  .action(
+    wrap(async (slug: string, opts: { label?: string; login: boolean }) => {
+      // Validation + config-append is a pure, unit-tested helper (config.ts);
+      // it throws a user-facing message on a bad/duplicate/over-cap slug (incl.
+      // the classic "pasted my token into the nickname" mistake).
+      const { entry, config } = addClaudeAccount(loadConfig(), slug, { label: opts.label });
+      const configDir = join(surplusDir(), 'profiles', entry.id);
+      mkdirSync(configDir, { recursive: true });
+      saveConfig(config);
+
+      const key = `claude:${entry.id}`;
+      const loginCmd = `CLAUDE_CONFIG_DIR=${configDir} claude auth login`;
+      console.log(`Registered account ${key} (label: ${entry.label})`);
+      console.log(`  profile: ${configDir}`);
+
+      if (!opts.login) {
+        console.log('\nNext — sign in to this account (surplus never sees your token):');
+        console.log(`  ${loginCmd}`);
+        return;
+      }
+
+      console.log('\nOpening Claude Code sign-in for this profile (surplus never sees your token)…\n');
+      const login = spawnSync('claude', ['auth', 'login'], {
+        stdio: 'inherit',
+        env: { ...process.env, CLAUDE_CONFIG_DIR: configDir },
+      });
+      if (login.error || login.status !== 0) {
+        console.log(`\nSign-in didn't complete. Re-run any time:\n  ${loginCmd}`);
+        return;
+      }
+      spawnSync('claude', ['auth', 'status'], {
+        stdio: 'inherit',
+        env: { ...process.env, CLAUDE_CONFIG_DIR: configDir },
+      });
+      console.log(`\n✓ ${key} is ready — it will burn in parallel with your other accounts.`);
     }),
   );
 
