@@ -194,6 +194,16 @@ export interface SurplusConfig {
   };
   /** Judge score (1–5) at/above which a run counts as done. Default 4. */
   judgePassScore: number;
+  /**
+   * EXPERIMENTAL orchestrator/executor delegation (claude only). When set, the
+   * worker runs as `orchestrator` and delegates implementation to an `executor`
+   * subagent via the Task tool (managed-agents pattern) to cut cost. Absent =
+   * the standard single-model path. See src/roles.ts.
+   */
+  roles?: {
+    orchestrator: ModelChoice;
+    executor: ModelChoice;
+  };
 }
 
 // ---------------------------------------------------------------------------

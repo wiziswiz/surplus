@@ -11,11 +11,12 @@
  */
 
 import { execFileSync, spawn } from 'node:child_process';
-import { createWriteStream, existsSync, mkdirSync, rmSync, symlinkSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import type { RunOutcome, RunnerResult, RunTaskArgs, TaskRow } from './types.js';
 import { sanitizeAccountKey } from './config.js';
 import { buildGoalCondition, redactSecrets } from './vision.js';
+import { resolveRolesPlan } from './roles.js';
 
 const QUOTA_RE = /rate.?limit|quota|overloaded|\b429\b|401|authentication|expired/i;
 // CONNECTION-LEVEL transient failures only (lost API connection / network blip /
@@ -479,6 +480,39 @@ export async function runTask(args: RunTaskArgs): Promise<RunnerResult> {
     judgeFeedback: args.judgeFeedback ?? null,
   });
 
+  // EXPERIMENTAL model roles (config.roles): run as a smart orchestrator that
+  // delegates to a cheaper executor subagent. Absent/invalid roles → the plan is
+  // the base model + tools + condition, byte-for-byte the standard path. Model
+  // strings pass the same argv-injection guard as args.model above.
+  let orchestrator: string | null = null;
+  let executor: string | null = null;
+  if (config.roles?.orchestrator && config.roles?.executor) {
+    try {
+      orchestrator = assertSafeFlagValue('model', config.roles.orchestrator);
+      executor = assertSafeFlagValue('model', config.roles.executor);
+    } catch {
+      orchestrator = null;
+      executor = null; // invalid role model → disable roles, never break the run
+    }
+  }
+  const plan = resolveRolesPlan({
+    baseModel: model,
+    baseAllowedTools: 'Bash(*) Edit Write WebFetch WebSearch',
+    condition,
+    orchestrator,
+    executor,
+  });
+  if (plan.executorAgent) {
+    try {
+      const agentPath = path.join(worktreePath, plan.executorAgent.relPath);
+      mkdirSync(path.dirname(agentPath), { recursive: true });
+      writeFileSync(agentPath, plan.executorAgent.content);
+    } catch {
+      // best-effort: if the subagent file can't be written, the orchestrator
+      // simply does the work itself (no delegation, but no failure).
+    }
+  }
+
   // Permission recipe verified empirically: 'auto'/'acceptEdits' alone deny
   // Bash in headless -p (no human to approve -> denial storm, 36 denials in
   // the first smoke run). acceptEdits + an explicit Bash/Edit/Write allowlist
@@ -487,18 +521,18 @@ export async function runTask(args: RunTaskArgs): Promise<RunnerResult> {
   const argv = [
     '-p',
     '--model',
-    model,
+    plan.model,
     '--effort',
     effort,
     '--permission-mode',
     'acceptEdits',
     '--allowedTools',
-    'Bash(*) Edit Write WebFetch WebSearch',
+    plan.allowedTools,
     '--disallowedTools',
     'Bash(git push*)',
     '--output-format',
     'json',
-    `/goal ${condition}`,
+    `/goal ${plan.goalText}`,
   ];
 
   try {
