@@ -433,6 +433,8 @@ export interface ApiState {
   config: SurplusConfig;
   /** Running tasks' ids for the board's live indicators. */
   running: string[];
+  /** Live Codex model slugs (from `codex debug models`, cached) for the model pickers. */
+  codexModels: string[];
 }
 
 // ---------------------------------------------------------------------------

@@ -8,7 +8,7 @@ import type {
   ConfigPatchDto,
   StateDto,
 } from '../types';
-import { EFFORT_SELECT_OPTIONS, MODEL_OPTIONS } from '../lib';
+import { EFFORT_SELECT_OPTIONS, MODEL_OPTIONS, codexModelOptions } from '../lib';
 import { SlideOver } from './SlideOver';
 import { InfoTip } from './InfoTip';
 
@@ -978,7 +978,7 @@ export function SettingsPanel({
                       id="set-codexModel"
                       label="Default model"
                       value={draft.codexModel}
-                      options={MODEL_OPTIONS.codex}
+                      options={codexModelOptions()}
                       onChange={(v) => set('codexModel', v)}
                     />
                     <SelectField

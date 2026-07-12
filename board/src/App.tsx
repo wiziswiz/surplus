@@ -27,6 +27,7 @@ import { Drawer } from './components/Drawer';
 import { ProjectDrawer } from './components/ProjectDrawer';
 import { AddProjectModal } from './components/AddProjectModal';
 import { SettingsPanel } from './components/SettingsPanel';
+import { setCodexModels } from './lib';
 
 export default function App() {
   const [state, setState] = useState<StateDto | null>(null);
@@ -47,6 +48,12 @@ export default function App() {
   useEffect(() => {
     drawerIdRef.current = drawerId;
   }, [drawerId]);
+
+  // Install the server's live Codex model list into the model pickers. Only fires
+  // when a full state carries codexModels — partial patches preserve the ref.
+  useEffect(() => {
+    if (state?.codexModels) setCodexModels(state.codexModels);
+  }, [state?.codexModels]);
 
   const refetchTasks = useCallback(() => {
     if (refetchTimer.current !== null) return;

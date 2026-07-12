@@ -87,19 +87,31 @@ export function providerTint(pref: ProviderPref): string {
   return pref === 'any' ? TINT.any : TINT[providerOfPref(pref)];
 }
 
-// Codex slugs as exposed by the current codex CLI (`codex debug models`).
-// codex-auto-review is intentionally excluded — it's a review-only model, not a
-// general task worker. TODO: source this list dynamically from `codex debug
-// models` so it can't rot again (the gpt-5.1-* slugs it replaced are now dead).
-export const MODEL_OPTIONS: Record<Provider | 'any', string[]> = {
-  claude: ['fable', 'opus', 'sonnet', 'haiku'],
-  codex: ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.3-codex-spark'],
-  any: ['fable', 'opus', 'sonnet', 'haiku', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini'],
-};
+// Claude models are stable aliases (never rot). Codex slugs are STATIC FALLBACK
+// only — the live list comes from the server (`codex debug models`, cached) via
+// StateDto.codexModels and is installed with setCodexModels() so a new model
+// (e.g. gpt-5.6-*) shows up in the pickers automatically.
+const CLAUDE_MODELS = ['fable', 'opus', 'sonnet', 'haiku'];
+const CODEX_FALLBACK = ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini'];
+
+let liveCodexModels: string[] | null = null;
+
+/** Install the server's live Codex model list (call on every state update). */
+export function setCodexModels(list: string[] | null | undefined): void {
+  liveCodexModels = Array.isArray(list) && list.length > 0 ? list : null;
+}
+
+/** Current Codex model options: the live list when known, else the static fallback. */
+export function codexModelOptions(): string[] {
+  return liveCodexModels ?? CODEX_FALLBACK;
+}
+
+export const MODEL_OPTIONS: Record<'claude', string[]> = { claude: CLAUDE_MODELS };
 
 /** Model picker options for any affinity pref ('claude:<id>' → claude models). */
 export function modelOptionsFor(pref: ProviderPref): string[] {
-  return pref === 'any' ? MODEL_OPTIONS.any : MODEL_OPTIONS[providerOfPref(pref)];
+  if (pref === 'any') return [...CLAUDE_MODELS, ...codexModelOptions()];
+  return providerOfPref(pref) === 'codex' ? codexModelOptions() : CLAUDE_MODELS;
 }
 
 export const EFFORT_OPTIONS = ['low', 'medium', 'high', 'xhigh', 'max'];

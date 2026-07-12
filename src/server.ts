@@ -37,6 +37,7 @@ import type {
   UsageSnapshot,
 } from './types.js';
 import { defaultClaudeDir, expandTilde, MAX_CLAUDE_ACCOUNTS, resolveAccounts } from './config.js';
+import { codexModels } from './models.js';
 import { discoverRepos } from './discover.js';
 
 // ---------------------------------------------------------------------------
@@ -653,6 +654,7 @@ export async function startServer(opts: StartServerOptions): Promise<void> {
       armed,
       config,
       running: db.listTasks('running').map((t) => t.id),
+      codexModels: codexModels(),
     };
   }
 
