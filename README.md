@@ -356,22 +356,27 @@ Settings → Providers → **Model roles** has one-click presets:
 | Balanced (default) | `opus` | `haiku` |
 | Max quality | `opus` | `fable` |
 
-### Orchestrator → executor delegation (experimental)
+### Orchestrator → executor delegation
 
-Optionally, the claude worker can run as a smart **orchestrator** that delegates
+Optionally, the claude worker runs as a smart **orchestrator** that delegates
 implementation to a cheaper **executor** subagent via Claude Code's Task tool
 (Anthropic's managed-agents pattern) — the smart model plans and reviews, the
-cheap one does the bulk edits. Opt in via config:
+cheap one does the bulk edits, so a long session spends most of its tokens on the
+cheaper model. Opt in via config:
 
 ```jsonc
 "roles": { "orchestrator": "fable", "executor": "sonnet" }
 ```
 
-surplus writes a `.claude/agents/executor.md` into the worktree and tells the
-orchestrator to delegate. **Experimental**: whether headless `claude -p` honors
-subagents end-to-end isn't verified — if the Task tool is unavailable the
-orchestrator just does the work itself (no delegation, no failure). Absent =
-the standard single-model path, unchanged.
+surplus writes a `.claude/agents/executor.md` into the worktree, adds the Task
+tool to the allowlist, runs the session as the orchestrator, and prepends a
+delegation instruction to the goal. **Verified**: a headless `claude -p` run as
+`fable` honored the executor subagent and delegated the work to an executor
+running on `sonnet` (which made the edits). It hasn't yet been observed inside a
+full `/goal` burn end-to-end, and the delegation is ultimately the orchestrator's
+call — if it declines or the Task tool is unavailable it just does the work
+itself (no delegation, no failure). Absent = the standard single-model path,
+byte-for-byte unchanged.
 
 ## Safety
 
