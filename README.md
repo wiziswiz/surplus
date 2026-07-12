@@ -336,11 +336,42 @@ task  >  VISION.md frontmatter  >  project  >  config provider defaults
 | Project | `surplus add ... --model haiku` | stored on the project row |
 | Config | `providers.<p>.defaults.model` / `.effort` | global fallback |
 
-Claude models: `opus` \| `sonnet` \| `haiku`; claude effort: `low` \|
-`medium` \| `high` \| `xhigh` \| `max`. Codex takes its own model ids (e.g.
-`gpt-5.5`; run `codex debug models` for the current list) and reasoning-effort
-strings. The judge model is configured
-separately (`judge.model`) and always runs on claude.
+Claude models: `fable` \| `opus` \| `sonnet` \| `haiku` (stable aliases —
+always the latest of each); claude effort: `low` \| `medium` \| `high` \|
+`xhigh` \| `max`. Codex model ids are discovered live from `codex debug
+models` (so new ones like `gpt-5.6-*` show up in the pickers automatically) with
+a static fallback; effort maps to `low`/`medium`/`high`/`xhigh`. The judge model
+is configured separately (`judge.model`) and always runs on claude.
+
+### Model roles (Executor vs Overseer)
+
+Two models do two jobs: the **Executor** runs the task (the long work session),
+the **Overseer** (judge) grades the result (a short pass). Putting a cheap model
+on the Executor and a smart one on the Overseer cuts cost without losing quality.
+Settings → Providers → **Model roles** has one-click presets:
+
+| Preset | Executor | Overseer (judge) |
+|---|---|---|
+| Cost-saver | `sonnet` | `fable` |
+| Balanced (default) | `opus` | `haiku` |
+| Max quality | `opus` | `fable` |
+
+### Orchestrator → executor delegation (experimental)
+
+Optionally, the claude worker can run as a smart **orchestrator** that delegates
+implementation to a cheaper **executor** subagent via Claude Code's Task tool
+(Anthropic's managed-agents pattern) — the smart model plans and reviews, the
+cheap one does the bulk edits. Opt in via config:
+
+```jsonc
+"roles": { "orchestrator": "fable", "executor": "sonnet" }
+```
+
+surplus writes a `.claude/agents/executor.md` into the worktree and tells the
+orchestrator to delegate. **Experimental**: whether headless `claude -p` honors
+subagents end-to-end isn't verified — if the Task tool is unavailable the
+orchestrator just does the work itself (no delegation, no failure). Absent =
+the standard single-model path, unchanged.
 
 ## Safety
 

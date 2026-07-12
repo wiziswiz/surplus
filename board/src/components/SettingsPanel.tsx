@@ -8,7 +8,7 @@ import type {
   ConfigPatchDto,
   StateDto,
 } from '../types';
-import { EFFORT_SELECT_OPTIONS, MODEL_OPTIONS } from '../lib';
+import { EFFORT_SELECT_OPTIONS, MODEL_OPTIONS, codexModelOptions } from '../lib';
 import { SlideOver } from './SlideOver';
 import { InfoTip } from './InfoTip';
 
@@ -781,6 +781,11 @@ export function SettingsPanel({
     setDraft((d) => ({ ...d, [key]: value }));
     setSaved(false);
   };
+  /** Model-roles preset: set the claude executor + the judge overseer together. */
+  const applyRoles = (executor: string, overseer: string) => {
+    setDraft((d) => ({ ...d, claudeModel: executor, judgeModel: overseer }));
+    setSaved(false);
+  };
   const blurCheck = (key: NumKey) => {
     setErrors((e) => ({ ...e, [key]: validateNum(key, draft[key]) }));
   };
@@ -934,6 +939,48 @@ export function SettingsPanel({
             <AccountsSection config={config} usage={state.usage} onSaved={onSaved} />
 
             <Section title="Providers">
+              <div className="flex flex-col gap-2 rounded-card bg-overlay p-4">
+                <span className="flex items-center gap-1.5">
+                  <h4 className="text-xs font-semibold uppercase tracking-[0.15em] text-dim">
+                    Model roles
+                  </h4>
+                  <InfoTip
+                    label="What are model roles?"
+                    text="The Executor runs the task (the long work session); the Overseer (judge) grades the result (a short pass). Put a cheap model on the Executor and a smart one on the Overseer to cut cost without losing quality."
+                  />
+                </span>
+                <div className="flex flex-wrap gap-2">
+                  {(
+                    [
+                      ['Cost-saver', 'Sonnet exec · Fable judge', 'sonnet', 'fable'],
+                      ['Balanced', 'Opus exec · Haiku judge', 'opus', 'haiku'],
+                      ['Max quality', 'Opus exec · Fable judge', 'opus', 'fable'],
+                    ] as const
+                  ).map(([name, sub, executor, overseer]) => {
+                    const active = draft.claudeModel === executor && draft.judgeModel === overseer;
+                    return (
+                      <button
+                        key={name}
+                        type="button"
+                        onClick={() => applyRoles(executor, overseer)}
+                        aria-pressed={active}
+                        title={sub}
+                        className={`rounded-full border px-3 py-1.5 text-xs transition-colors ${
+                          active
+                            ? 'border-ember bg-ember/20 text-ember'
+                            : 'border-line text-dim hover:border-ember hover:text-ink'
+                        }`}
+                      >
+                        {name} <span className="text-faint">· {sub}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="text-xs leading-relaxed text-faint">
+                  Presets set the claude Executor (below) and the judge Overseer (Advanced → Judge).
+                  Review and Save.
+                </p>
+              </div>
               <div className="flex flex-col gap-3 rounded-card bg-overlay p-4">
                 <h4 className="text-xs font-semibold uppercase tracking-[0.15em] text-ember">
                   claude
@@ -942,6 +989,12 @@ export function SettingsPanel({
                   <SelectField
                     id="set-claudeModel"
                     label="Default model"
+                    labelTip={
+                      <InfoTip
+                        label="What is the default model?"
+                        text="The Executor — the model that runs the task. Use a cheaper one here and a smart Overseer (judge) to cut cost."
+                      />
+                    }
                     value={draft.claudeModel}
                     options={MODEL_OPTIONS.claude}
                     onChange={(v) => set('claudeModel', v)}
@@ -978,7 +1031,7 @@ export function SettingsPanel({
                       id="set-codexModel"
                       label="Default model"
                       value={draft.codexModel}
-                      options={MODEL_OPTIONS.codex}
+                      options={codexModelOptions()}
                       onChange={(v) => set('codexModel', v)}
                     />
                     <SelectField
@@ -1077,7 +1130,13 @@ export function SettingsPanel({
                     <SelectField
                       id="set-judgeModel"
                       label="Judge model"
-                      help="Always runs on claude; cheap models judge fine."
+                      labelTip={
+                        <InfoTip
+                          label="What is the judge model?"
+                          text="The Overseer — it grades each run against your VISION (a short pass, not the long work). A smart model here + a cheap Executor is the cost-saver split."
+                        />
+                      }
+                      help="Always runs on claude; runs briefly."
                       value={draft.judgeModel}
                       options={MODEL_OPTIONS.claude}
                       onChange={(v) => set('judgeModel', v)}

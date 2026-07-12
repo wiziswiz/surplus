@@ -131,6 +131,8 @@ export interface StateDto {
   armed: boolean;
   config: ConfigDto;
   running: string[];
+  /** Live Codex model slugs (from `codex debug models`, cached server-side). */
+  codexModels?: string[];
 }
 
 export interface ProjectDto {
