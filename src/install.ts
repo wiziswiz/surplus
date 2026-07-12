@@ -36,12 +36,45 @@ function escapeXml(value: string): string {
   return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+/**
+ * PATH for the launchd services. launchd's default PATH is only
+ * `/usr/bin:/bin:/usr/sbin:/sbin`, which omits Homebrew (`/opt/homebrew/bin`),
+ * `/usr/local/bin`, `~/.local/bin`, etc. — so a service can't find the `claude`
+ * or `codex` CLIs it must spawn for usage probing AND task execution. Bake the
+ * install-time PATH (the user's shell, where the CLIs live) plus the common CLI
+ * locations into the plist so the services can actually run the tools.
+ */
+export function launchdPath(env: NodeJS.ProcessEnv = process.env): string {
+  const seen = new Set<string>();
+  const dirs: string[] = [];
+  const add = (d: string): void => {
+    if (d && !seen.has(d)) {
+      seen.add(d);
+      dirs.push(d);
+    }
+  };
+  for (const d of (env.PATH ?? '').split(':')) add(d);
+  for (const d of [
+    '/opt/homebrew/bin',
+    '/usr/local/bin',
+    join(homedir(), '.local', 'bin'),
+    '/usr/bin',
+    '/bin',
+    '/usr/sbin',
+    '/sbin',
+  ]) {
+    add(d);
+  }
+  return dirs.join(':');
+}
+
 /** Pure plist renderer (exported for tests). */
 export function renderPlist(args: {
   nodePath: string;
   scriptPath: string;
   intervalSeconds: number;
   logPath: string;
+  path: string;
 }): string {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -55,6 +88,11 @@ export function renderPlist(args: {
     <string>${escapeXml(args.scriptPath)}</string>
     <string>tick</string>
   </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>${escapeXml(args.path)}</string>
+  </dict>
   <key>StartInterval</key>
   <integer>${args.intervalSeconds}</integer>
   <key>RunAtLoad</key>
@@ -91,6 +129,7 @@ export function installLaunchd(opts?: { intervalMinutes?: number }): string {
       scriptPath: surplusBinPath(),
       intervalSeconds,
       logPath,
+      path: launchdPath(),
     }),
   );
 
@@ -134,6 +173,7 @@ export function renderBoardPlist(args: {
   scriptPath: string;
   port: number;
   logPath: string;
+  path: string;
 }): string {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -149,6 +189,11 @@ export function renderBoardPlist(args: {
     <string>--port</string>
     <string>${args.port}</string>
   </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>${escapeXml(args.path)}</string>
+  </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
@@ -183,6 +228,7 @@ export function installBoardLaunchd(opts: { port: number }): string {
       scriptPath: surplusBinPath(),
       port: opts.port,
       logPath,
+      path: launchdPath(),
     }),
   );
   try {

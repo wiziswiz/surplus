@@ -30,6 +30,7 @@ import {
   LAUNCHD_LABEL,
   installDockApp,
   installLaunchd,
+  launchdPath,
   launchdPlistPath,
   renderBoardPlist,
   renderDockAppInfoPlist,
@@ -59,6 +60,7 @@ describe('renderPlist', () => {
       scriptPath: '/repo/bin/surplus.js',
       intervalSeconds: 900,
       logPath: '/home/u/.surplus/logs/launchd.log',
+      path: '/opt/homebrew/bin:/usr/bin:/bin',
     });
     expect(xml).toContain(`<string>${LAUNCHD_LABEL}</string>`);
     expect(xml).toContain('<integer>900</integer>');
@@ -66,6 +68,10 @@ describe('renderPlist', () => {
     expect(xml).toContain('<string>/usr/local/bin/node</string>');
     expect(xml).toContain('<string>/repo/bin/surplus.js</string>');
     expect(xml).toContain('<string>tick</string>');
+    // PATH is baked in so the service can find the claude/codex CLIs
+    expect(xml).toMatch(
+      /<key>EnvironmentVariables<\/key>\s*<dict>\s*<key>PATH<\/key>\s*<string>\/opt\/homebrew\/bin:\/usr\/bin:\/bin<\/string>/,
+    );
     // both stdout and stderr go to the same launchd.log
     expect(xml.match(/<string>\/home\/u\/\.surplus\/logs\/launchd\.log<\/string>/g)).toHaveLength(2);
   });
@@ -76,6 +82,7 @@ describe('renderPlist', () => {
       scriptPath: '/repo/bin/surplus.js',
       intervalSeconds: 60,
       logPath: '/tmp/a&b.log',
+      path: '/opt/homebrew/bin',
     });
     expect(xml).toContain('/odd &amp; path/&lt;node&gt;');
     expect(xml).toContain('/tmp/a&amp;b.log');
@@ -153,6 +160,7 @@ describe('renderBoardPlist', () => {
       scriptPath: '/repo/bin/surplus.js',
       port: 4242,
       logPath: '/home/.surplus/logs/board-launchd.log',
+      path: '/opt/homebrew/bin:/usr/bin',
     });
     expect(xml).toContain(`<string>${BOARD_LAUNCHD_LABEL}</string>`);
     expect(xml).toContain('<key>KeepAlive</key>\n  <true/>');
@@ -160,6 +168,28 @@ describe('renderBoardPlist', () => {
     expect(xml).toContain('<string>board</string>');
     expect(xml).toContain('<string>--port</string>');
     expect(xml).toContain('<string>4242</string>');
+    expect(xml).toContain('<key>PATH</key>\n    <string>/opt/homebrew/bin:/usr/bin</string>');
+  });
+});
+
+describe('launchdPath', () => {
+  it('prepends the install-time PATH and includes common CLI dirs, deduped', () => {
+    const p = launchdPath({ PATH: '/opt/homebrew/bin:/usr/bin' } as NodeJS.ProcessEnv);
+    const parts = p.split(':');
+    // install-time entries come first
+    expect(parts[0]).toBe('/opt/homebrew/bin');
+    // homebrew/local/standard dirs are all present
+    for (const d of ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin']) {
+      expect(parts).toContain(d);
+    }
+    // no duplicates
+    expect(new Set(parts).size).toBe(parts.length);
+  });
+
+  it('still yields the common CLI dirs when the env PATH is empty', () => {
+    const parts = launchdPath({ PATH: '' } as NodeJS.ProcessEnv).split(':');
+    expect(parts).toContain('/opt/homebrew/bin');
+    expect(parts).toContain('/usr/local/bin');
   });
 });
 
