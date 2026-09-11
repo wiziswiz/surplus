@@ -26,3 +26,6 @@ desktop/src-tauri/icons/ios/
 logs/
 *.log
 .DS_Store
+
+# surplus self-burn "done" markers (transient, machine-local)
+.build-*.created
