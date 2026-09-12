@@ -176,8 +176,11 @@ export function classifyClaudeOutcome(c: ClaudeOutcomeInputs): RunOutcome {
     outcome = 'error';
   } else if (c.code === 0) {
     outcome = c.isError === true ? 'error' : 'failed';
-  } else if (c.signal === 'SIGTERM' || c.signal === 'SIGKILL') {
-    outcome = 'killed'; // external stop (user pause / system)
+  } else if (c.signal === 'SIGTERM' || c.signal === 'SIGKILL' || c.code === 143 || c.code === 137) {
+    // External stop (user pause / system). Claude Code traps SIGTERM/SIGKILL-adjacent
+    // shutdowns and exits 143/137 itself, so the signal field is null — treat the
+    // shell-convention exit codes the same way rather than burning an attempt as 'error'.
+    outcome = 'killed';
   } else {
     outcome = 'error';
   }
