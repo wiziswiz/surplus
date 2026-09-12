@@ -231,7 +231,7 @@ export function parseVision(markdown: string): Vision {
 // buildGoalCondition
 // ---------------------------------------------------------------------------
 
-const GOAL_CONDITION_CAP = 4000;
+const GOAL_CONDITION_CAP_TOTAL = 4000;
 const TRUNCATION_MARKER = ' …[truncated]';
 
 /**
@@ -244,8 +244,16 @@ export function buildGoalCondition(args: {
   task: TaskRow;
   config: SurplusConfig;
   judgeFeedback?: string | null;
+  /**
+   * Characters to reserve for text the caller prepends AFTER this returns (the
+   * roles orchestration preamble). The cap applies to the FINAL /goal text —
+   * Claude Code rejects conditions over 4000 chars outright ("Goal condition is
+   * limited to 4000 characters"), which would fail every attempt in 0 turns.
+   */
+  reserve?: number;
 }): string {
   const { vision, task, config } = args;
+  const GOAL_CONDITION_CAP = Math.max(500, GOAL_CONDITION_CAP_TOTAL - Math.max(0, args.reserve ?? 0));
   const feedback = args.judgeFeedback ?? null;
   const maxTurns = config.dispatcher.maxTurnsHint;
 

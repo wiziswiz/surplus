@@ -172,6 +172,15 @@ describe('parseVision', () => {
 });
 
 describe('buildGoalCondition', () => {
+  it('honours a reserve so a prepended roles preamble cannot push the /goal text past 4000', () => {
+    const vision = parseVision('# Vision\n\n' + 'x'.repeat(3000) + '\n\n## Guardrails\n\n- ' + 'g'.repeat(900));
+    const task = { id: 't', title: 'T', body: 'b'.repeat(2000) } as never;
+    const config = { dispatcher: { maxTurnsHint: 40 } } as never;
+    const full = buildGoalCondition({ vision, task, config });
+    const reserved = buildGoalCondition({ vision, task, config, reserve: 350 });
+    expect(full.length).toBeLessThanOrEqual(4000);
+    expect(reserved.length).toBeLessThanOrEqual(3650);
+  });
   it('includes title, body, criteria, verify, ui flows, guardrails and turn bound', () => {
     const out = buildGoalCondition({
       vision: makeVision(),
