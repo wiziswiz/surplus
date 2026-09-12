@@ -122,6 +122,12 @@ export interface ProviderConfig {
    */
   weeklyResetFallback?: string | null;
   /**
+   * codex only: a CODEX_HOME directory holding a separate Codex CLI login
+   * (`CODEX_HOME=<dir> codex login`) to burn instead of the default ~/.codex
+   * account. '~' is expanded. null = default ~/.codex.
+   */
+  codexHome?: string | null;
+  /**
    * claude only: burnable subscription accounts (max 6). Absent/empty = the
    * single default account [{id:'main', label:'personal', configDir:null,
    * priority:null}]. Enumerate via config.ts resolveAccounts() — never read

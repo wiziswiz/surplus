@@ -308,7 +308,13 @@ function extractRateLimits(jsonlTail: string): CodexRateLimits | null {
         payload?: { type?: string; rate_limits?: CodexRateLimits | null };
       };
       const payload = obj.payload;
-      if (payload?.type === 'token_count' && payload.rate_limits) return payload.rate_limits;
+      if (payload?.type !== 'token_count' || !payload.rate_limits) continue;
+      // Newer CLIs (0.154+) also emit credit-only blocks (limit_id "premium",
+      // primary/secondary both null) after the real window block. They carry no
+      // window data, so keep scanning backwards for the newest block that does.
+      const rl = payload.rate_limits;
+      if (!rl.primary && !rl.secondary) continue;
+      return rl;
     } catch {
       // Partial first line of the tail window, or a non-JSON line — skip.
     }
@@ -384,7 +390,14 @@ function makeDefaultCliCheck(spawnFn: SpawnFn): () => Promise<boolean> {
 
 export function codexAdapter(config: SurplusConfig, deps: CodexAdapterDeps = {}): ProviderAdapter {
   const now = deps.now ?? Date.now;
-  const codexHome = deps.codexHome ?? join(homedir(), '.codex');
+  // Config-declared CODEX_HOME (a second Codex login) wins over the default
+  // ~/.codex; the test seam `deps.codexHome` wins over both.
+  const configuredHome = config.providers.codex?.codexHome ?? null;
+  const codexHome =
+    deps.codexHome ??
+    (configuredHome ? configuredHome.replace(/^~(?=$|\/)/, homedir()) : join(homedir(), '.codex'));
+  // Only CODEX_HOME is overridden (never a secret); absent = inherit env untouched.
+  const codexEnv = configuredHome && !deps.codexHome ? { env: { ...process.env, CODEX_HOME: codexHome } } : {};
   const spawnFn: SpawnFn = deps.spawn ?? (nodeSpawn as unknown as SpawnFn);
   const cliInstalled = deps.checkCliInstalled ?? makeDefaultCliCheck(spawnFn);
 
@@ -494,6 +507,7 @@ export function codexAdapter(config: SurplusConfig, deps: CodexAdapterDeps = {})
       const child = spawnFn('codex', cliArgs, {
         cwd: worktreePath,
         stdio: ['pipe', 'pipe', 'pipe'],
+        ...codexEnv,
         // argv array, NO shell — nothing is shell-interpolated.
       });
 

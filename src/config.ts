@@ -283,6 +283,7 @@ export function defaultConfig(): SurplusConfig {
         enabled: false,
         defaults: { model: 'gpt-5.5', effort: 'high' },
         weeklyResetFallback: null,
+        codexHome: null,
       },
     },
     modes: {

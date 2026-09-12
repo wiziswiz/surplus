@@ -113,6 +113,7 @@ function buildDeps(nowFn: () => number = () => Date.now()): CliDeps {
         },
         judgeModel: config.judge.model,
         projectPath: args.project.path,
+        configDir: args.configDir,
         // Ephemeral judge worktree lives under ~/.surplus/worktrees as
         // judge-<taskId> (distinct from the live run's <taskId> worktree).
         worktreesDir: worktreesDirPath(),

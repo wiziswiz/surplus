@@ -32,6 +32,8 @@ export interface JudgeRunArgs {
   project: ProjectRow;
   vision: Vision;
   result: RunnerResult;
+  /** The burning account's CLAUDE_CONFIG_DIR so the judge bills the same subscription; null = default profile. */
+  configDir: string | null;
   config: SurplusConfig;
 }
 
@@ -375,7 +377,7 @@ async function runOne(
   let verdict: JudgeVerdict | null = null;
   if (!JUDGE_SKIP.has(result.outcome)) {
     try {
-      verdict = await deps.judgeRun({ task, project, vision, result, config: deps.config });
+      verdict = await deps.judgeRun({ task, project, vision, result, config: deps.config, configDir: account.configDir });
     } catch (err) {
       verdict = { score: 0, reasons: `judge failed: ${redact(errMessage(err))}`, missing: '' };
     }

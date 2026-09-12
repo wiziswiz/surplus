@@ -45,6 +45,7 @@ describe('defaultConfig', () => {
       enabled: false,
       defaults: { model: 'gpt-5.5', effort: 'high' },
       weeklyResetFallback: null,
+        codexHome: null,
     });
     expect(c.modes.weeklySurplus).toEqual({ enabled: true, burnWindowHours: 12, stopAtPct: 95 });
     expect(c.modes.fiveHourBurst).toEqual({

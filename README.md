@@ -455,7 +455,10 @@ example (strip comments; the real file is plain JSON):
       // When the codex CLI doesn't expose live usage: a known weekly reset,
       // ISO timestamp or 'Thu 21:00'-style weekday+time. null = no fallback
       // (codex usage unavailable; it won't burn).
-      "weeklyResetFallback": null
+      "weeklyResetFallback": null,
+      // Optional: a second Codex login to burn instead of ~/.codex — create it
+      // with `CODEX_HOME=~/.surplus/profiles/codex2 codex login`. null = ~/.codex.
+      "codexHome": null
     }
   },
   "modes": {
