@@ -397,8 +397,10 @@ export function codexAdapter(config: SurplusConfig, deps: CodexAdapterDeps = {})
   const codexHome =
     deps.codexHome ??
     (configuredHome ? configuredHome.replace(/^~(?=$|\/)/, homedir()) : join(homedir(), '.codex'));
-  // Only CODEX_HOME is overridden (never a secret); absent = inherit env untouched.
-  const codexEnv = configuredHome && !deps.codexHome ? { env: { ...process.env, CODEX_HOME: codexHome } } : {};
+  // ALWAYS export the resolved home: probing and spawning must agree on one
+  // absolute CODEX_HOME per account, and an inherited CODEX_HOME in the tick's
+  // environment must never redirect the main account to another login.
+  const codexEnv = { env: { ...process.env, CODEX_HOME: codexHome } };
   const spawnFn: SpawnFn = deps.spawn ?? (nodeSpawn as unknown as SpawnFn);
   const cliInstalled = deps.checkCliInstalled ?? makeDefaultCliCheck(spawnFn);
 

@@ -2,7 +2,7 @@ import type { ConfigDto, Provider, ProviderPref, TaskDto } from './types';
 
 /** Provider behind an affinity pref ('claude:<id>' → 'claude'; 'any' falls back to claude). */
 export function providerOfPref(pref: ProviderPref): Provider {
-  return pref === 'codex' ? 'codex' : 'claude';
+  return pref === 'codex' || pref.startsWith('codex:') ? 'codex' : 'claude';
 }
 
 /**
@@ -19,11 +19,18 @@ export function affinityOptions(
       value: `claude:${a.id}` as ProviderPref,
       text: `claude · ${a.label || a.id}`,
     }));
+  const codexExtras = (config?.providers?.codex?.accounts ?? [])
+    .filter((a) => a.id !== 'main')
+    .map((a) => ({
+      value: `codex:${a.id}` as ProviderPref,
+      text: `codex · ${a.label || a.id}`,
+    }));
   return [
     { value: 'any', text: 'any' },
     { value: 'claude', text: 'claude' },
     ...extras,
     { value: 'codex', text: 'codex' },
+    ...codexExtras,
   ];
 }
 

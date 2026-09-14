@@ -8,7 +8,7 @@ export type Provider = 'claude' | 'codex';
  */
 export type AccountKey = string;
 /** Task/project affinity grammar: claude | codex | any | claude:<id>. */
-export type ProviderPref = Provider | 'any' | `claude:${string}`;
+export type ProviderPref = Provider | 'any' | `claude:${string}` | `codex:${string}`;
 
 export type TaskStatus =
   | 'triage'
@@ -51,12 +51,23 @@ export interface ClaudeAccountDto {
   priority: number | null;
 }
 
+/** One configured codex account (providers.codex.accounts entries). */
+export interface CodexAccountDto {
+  id: string;
+  label: string;
+  /** CODEX_HOME dir; null = default ~/.codex (main only). */
+  codexHome: string | null;
+  priority: number | null;
+}
+
 export interface ProviderConfigDto {
   enabled: boolean;
   defaults: { model: string; effort: string };
   weeklyResetFallback?: string | null;
-  /** claude only: burnable accounts (max 6). Absent = the single main account. */
-  accounts?: ClaudeAccountDto[];
+  /** burnable accounts (max 6). Absent = the single main account. Claude entries carry configDir, codex entries codexHome. */
+  accounts?: ClaudeAccountDto[] | CodexAccountDto[];
+  /** codex only: default CODEX_HOME for the main account; null = ~/.codex. */
+  codexHome?: string | null;
 }
 
 export interface ConfigDto {
@@ -88,8 +99,9 @@ export interface ConfigPatchDto {
         enabled?: boolean;
         defaults?: { model?: string; effort?: string };
         weeklyResetFallback?: string | null;
-        /** claude only: whole-array replace, max 6. */
-        accounts?: ClaudeAccountDto[];
+        /** whole-array replace, max 6. */
+        accounts?: ClaudeAccountDto[] | CodexAccountDto[];
+        codexHome?: string | null;
       }
     >
   >;

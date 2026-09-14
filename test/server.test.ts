@@ -237,6 +237,33 @@ describe('buildConfigPatch', () => {
   });
 });
 
+describe('buildConfigPatch — providers.codex (codexHome + accounts)', () => {
+  it('accepts codexHome (null or ~/absolute) and a codex account list', () => {
+    expect(buildConfigPatch({ providers: { codex: { codexHome: null } } }).ok).toBe(true);
+    expect(buildConfigPatch({ providers: { codex: { codexHome: '~/.surplus/profiles/codex2' } } }).ok).toBe(true);
+    const r = buildConfigPatch({
+      providers: {
+        codex: {
+          accounts: [
+            { id: 'main', label: 'primary', codexHome: null, priority: null },
+            { id: 'council', label: 'Pro', codexHome: '~/.surplus/profiles/codex2', priority: 1 },
+          ],
+        },
+      },
+    });
+    expect(r.ok).toBe(true);
+  });
+
+  it('rejects a non-main codex account without a codexHome, duplicate homes, relative paths and unknown keys', () => {
+    const bad = (accounts: unknown) => buildConfigPatch({ providers: { codex: { accounts } } });
+    expect(bad([{ id: 'x', label: 'x', codexHome: null, priority: null }]).ok).toBe(false);
+    expect(bad([{ id: 'a', label: 'a', codexHome: '~/h' }, { id: 'b', label: 'b', codexHome: '~/h' }]).ok).toBe(false);
+    expect(bad([{ id: 'a', label: 'a', codexHome: 'relative/dir' }]).ok).toBe(false);
+    expect(bad([{ id: 'a', label: 'a', codexHome: '~/h', configDir: '~/x' }]).ok).toBe(false);
+    expect(buildConfigPatch({ providers: { codex: { codexHome: 'relative' } } }).ok).toBe(false);
+  });
+});
+
 describe('buildConfigPatch — providers.claude.accounts', () => {
   const acct = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
     id: 'work',

@@ -93,6 +93,8 @@ const JUDGE_SKIP: ReadonlySet<RunOutcome> = new Set([
  * every tick forever, never blocking. Reset to 0 on any non-infra outcome.
  */
 const INFRA_STREAK_CAP = 3;
+/** A run killed from outside (SIGTERM/143) is refunded but not re-launched at once: the task waits this long. */
+const KILLED_BACKOFF_MS = 5 * 60_000;
 
 const AUTH_ERROR_RE = /quota|rate.?limit|401|authentication|expired/i;
 
@@ -465,6 +467,9 @@ async function runOne(
     db.updateTask(task.id, {
       status: blocked ? 'blocked' : 'ready',
       ...(interrupted ? { attempts: Math.max(0, fresh.attempts - 1) } : {}),
+      // An external kill is refunded, but re-launching it immediately would spin
+      // inside one tick if the killer recurs — back the task off instead.
+      ...(result.outcome === 'killed' ? { scheduledAt: Date.now() + KILLED_BACKOFF_MS } : {}),
       consecutiveInfra: 0,
       judgeFeedback: buildFeedback(verdict, result, fresh.judgeFeedback),
     });
@@ -482,6 +487,7 @@ async function runOne(
   const respawnGuard =
     result.outcome === 'quota' ||
     result.outcome === 'infra' ||
+    result.outcome === 'killed' ||
     (result.outcome === 'error' && AUTH_ERROR_RE.test(result.summary ?? ''));
 
   return { outcome: finalOutcome, respawnGuard };

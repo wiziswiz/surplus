@@ -613,6 +613,36 @@ describe('dispatchTick', () => {
     expect(db.listRunsForTask(task.id)).toHaveLength(2);
   });
 
+  it('killed outcome (external SIGTERM) refunds the attempt, backs the task off, and trips the respawn guard', async () => {
+    const p = makeProject('pa');
+    const q = makeProject('pb');
+    const t1 = db.createTask({ projectId: p.id, title: 'first', status: 'ready', priority: 1 });
+    db.createTask({ projectId: q.id, title: 'second', status: 'ready', priority: 2 });
+    let judgeCalls = 0;
+    const deps = makeDeps({
+      accounts: [
+        fakeAccount('claude', () =>
+          makeRunnerResult({ outcome: 'killed', summary: 'claude exited with code 143', exitCode: 143 }),
+        ),
+      ],
+      judgeRun: async () => {
+        judgeCalls += 1;
+        return { score: 5, reasons: '', missing: '' };
+      },
+    });
+    const before = Date.now();
+    const res = await dispatchTick(deps);
+    // One launch, then the tick halts: an immediate relaunch would spin if the killer recurs.
+    expect(res.launched).toBe(1);
+    expect(res.results).toEqual([{ taskId: t1.id, provider: 'claude', outcome: 'killed' }]);
+    expect(judgeCalls).toBe(0);
+    const after = db.getTask(t1.id)!;
+    expect(after.status).toBe('ready');
+    expect(after.attempts).toBe(0); // refunded
+    expect(after.scheduledAt).not.toBeNull();
+    expect(after.scheduledAt!).toBeGreaterThanOrEqual(before + 4 * 60_000); // ~5 min backoff
+  });
+
   it('quota outcome skips the judge, requeues the task, and trips the respawn guard', async () => {
     const p = makeProject('pa');
     const q = makeProject('pb');

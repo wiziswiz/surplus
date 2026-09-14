@@ -23,6 +23,7 @@ import type {
   AccountAdapter,
   ApiState,
   ClaudeAccountConfig,
+  CodexAccountConfig,
   DecideInput,
   Decision,
   ProjectRow,
@@ -315,8 +316,10 @@ export interface ConfigPatch {
         enabled?: boolean;
         defaults?: { model?: string; effort?: string };
         weeklyResetFallback?: string | null;
-        /** claude only (rejected for codex). Whole-array replace, max 6. */
-        accounts?: ClaudeAccountConfig[];
+        /** Whole-array replace, max 6 (claude entries: configDir; codex entries: codexHome). */
+        accounts?: ClaudeAccountConfig[] | CodexAccountConfig[];
+        /** codex only: default CODEX_HOME for the main account. */
+        codexHome?: string | null;
       }
     >
   >;
@@ -455,6 +458,53 @@ const CLAUDE_PROVIDER_SPEC: SpecNode = {
   accounts: wantClaudeAccounts,
 };
 
+/** codex: a default CODEX_HOME plus its own multi-account list. */
+const wantCodexHome: FieldCheck = (v, p) =>
+  v === null || (typeof v === 'string' && (v === '~' || v.startsWith('~/') || path.isAbsolute(v)))
+    ? null
+    : `${p} must be an absolute or ~-prefixed path, or null`;
+const wantCodexAccounts: FieldCheck = (v, p) => {
+  if (!Array.isArray(v)) return `${p} must be an array of accounts`;
+  if (v.length > MAX_CLAUDE_ACCOUNTS) return `${p} must contain at most ${MAX_CLAUDE_ACCOUNTS} accounts`;
+  const seen = new Set<string>();
+  const seenHomes = new Set<string>();
+  for (let i = 0; i < v.length; i++) {
+    const entry: unknown = v[i];
+    const ep = `${p}[${i}]`;
+    if (!isPlainObject(entry)) return `${ep} must be an object`;
+    for (const key of Object.keys(entry)) {
+      if (!['id', 'label', 'codexHome', 'priority'].includes(key)) return `unknown account key '${ep}.${key}'`;
+    }
+    const { id, label } = entry;
+    if (typeof id !== 'string' || !ACCOUNT_ID_RE.test(id)) {
+      return `${ep}.id must be a slug of 1–24 lowercase [a-z0-9-] characters`;
+    }
+    if (seen.has(id)) return `${ep}.id duplicates account id '${id}'`;
+    seen.add(id);
+    if (typeof label !== 'string' || label.trim().length === 0 || label.trim().length > 40) {
+      return `${ep}.label must be a non-empty string of at most 40 characters`;
+    }
+    const home = entry.codexHome ?? null;
+    if (id !== 'main' && home === null) return `${ep}.codexHome is required for a non-main account`;
+    if (home !== null && wantCodexHome(home, `${ep}.codexHome`)) return wantCodexHome(home, `${ep}.codexHome`);
+    if (typeof home === 'string') {
+      const key = path.resolve(expandTilde(home));
+      if (seenHomes.has(key)) return `${ep}.codexHome duplicates another account's home`;
+      seenHomes.add(key);
+    }
+    const priority = entry.priority ?? null;
+    if (priority !== null && !(Number.isInteger(priority) && (priority as number) >= 0 && (priority as number) <= 99)) {
+      return `${ep}.priority must be an integer 0–99 or null`;
+    }
+  }
+  return null;
+};
+const CODEX_PROVIDER_SPEC: SpecNode = {
+  ...PROVIDER_SPEC,
+  codexHome: wantCodexHome,
+  accounts: wantCodexAccounts,
+};
+
 const CONFIG_SPEC: SpecNode = {
   modes: {
     weeklySurplus: { enabled: wantBool, burnWindowHours: wantPosInt, stopAtPct: wantPct },
@@ -513,7 +563,7 @@ export function buildConfigPatch(
         }
         const r = walkSpec(
           pv,
-          prov === 'claude' ? CLAUDE_PROVIDER_SPEC : PROVIDER_SPEC,
+          prov === 'claude' ? CLAUDE_PROVIDER_SPEC : CODEX_PROVIDER_SPEC,
           `providers.${prov}`,
         );
         if (!r.ok) return r;
@@ -1022,10 +1072,25 @@ export async function startServer(opts: StartServerOptions): Promise<void> {
     // longer exists would starve silently in 'ready' (the claim predicate
     // never matches it). Rewrite stale affinities to the 'claude' provider
     // and record an event so the change is visible on the board.
-    if (built.patch.providers?.claude?.accounts) {
-      const knownKeys = new Set(resolveAccounts(effective).map((a) => a.key));
+    const patchedAccountProviders = PROVIDERS.filter((p) => built.patch.providers?.[p]?.accounts);
+    if (patchedAccountProviders.length > 0) {
+      // Known keys are computed with BOTH providers enabled: a disabled provider's
+      // still-configured accounts are not removed accounts, and an edit to one
+      // provider's list must never rewrite the other provider's affinities.
+      const probe: SurplusConfig = {
+        ...effective,
+        providers: {
+          claude: { ...effective.providers.claude, enabled: true },
+          codex: { ...effective.providers.codex, enabled: true },
+        },
+      };
+      const knownKeys = new Set(resolveAccounts(probe).map((a) => a.key));
+      const stale = (key: string): boolean =>
+        CLAUDE_ACCOUNT_KEY_RE.test(key) &&
+        patchedAccountProviders.some((p) => key.startsWith(`${p}:`)) &&
+        !knownKeys.has(key);
       for (const t of db.listTasks()) {
-        if (CLAUDE_ACCOUNT_KEY_RE.test(t.provider) && !knownKeys.has(t.provider)) {
+        if (stale(t.provider)) {
           db.updateTask(t.id, { provider: t.provider.split(':')[0] as Provider, updatedAt: Date.now() });
           db.appendEvent('task-updated', t.id, {
             fields: ['provider'],
@@ -1034,7 +1099,7 @@ export async function startServer(opts: StartServerOptions): Promise<void> {
         }
       }
       for (const p of db.listProjects()) {
-        if (CLAUDE_ACCOUNT_KEY_RE.test(p.provider) && !knownKeys.has(p.provider)) {
+        if (stale(p.provider)) {
           db.updateProject(p.id, { provider: p.provider.split(':')[0] as Provider });
           db.appendEvent('task-updated', null, {
             fields: ['provider'],
