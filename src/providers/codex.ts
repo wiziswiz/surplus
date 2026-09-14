@@ -32,7 +32,7 @@
  * the non-secret session rollout JSONL (usage numbers only).
  */
 
-import { spawn as nodeSpawn } from 'node:child_process';
+import { execFileSync, spawn as nodeSpawn } from 'node:child_process';
 import type { ChildProcess, SpawnOptions } from 'node:child_process';
 import { createWriteStream } from 'node:fs';
 import { mkdir, open, readdir, readFile } from 'node:fs/promises';
@@ -356,6 +356,19 @@ function rateLimitsToSnapshot(rl: CodexRateLimits, nowMs: number): UsageSnapshot
   };
 }
 
+/** Absolute path of the git dir shared by a (linked) worktree, or null when not a git checkout. */
+function gitCommonDirOf(worktreePath: string): string | null {
+  try {
+    const out = execFileSync('git', ['-C', worktreePath, 'rev-parse', '--path-format=absolute', '--git-common-dir'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    return out === '' ? null : out;
+  } catch {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // CLI presence
 // ---------------------------------------------------------------------------
@@ -501,6 +514,12 @@ export function codexAdapter(config: SurplusConfig, deps: CodexAdapterDeps = {})
         '-m',
         model,
       ];
+      // A linked worktree keeps its index and refs under the MAIN repo's .git
+      // (outside the workspace-write root), so `git commit` inside the sandbox
+      // failed on index.lock and only surplus's checkpoint commit rescued the
+      // work. Grant the shared git dir explicitly.
+      const gitCommonDir = gitCommonDirOf(worktreePath);
+      if (gitCommonDir) cliArgs.push('--add-dir', gitCommonDir);
       const effort = mapCodexEffort(args.effort);
       if (effort) cliArgs.push('-c', `model_reasoning_effort="${effort}"`);
       cliArgs.push('-'); // read the prompt from stdin (avoids argv length limits)
