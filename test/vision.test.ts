@@ -199,6 +199,9 @@ describe('buildGoalCondition', () => {
     // mandatory guardrails are always present
     expect(out).toContain('Never push to any remote.');
     expect(out).toContain('Commit your work to the current branch with clear messages.');
+    const host = buildGoalCondition({ vision: makeVision(), task: makeTask(), config: makeConfig(40), commitPolicy: 'host' });
+    expect(host).not.toContain('Commit your work');
+    expect(host).toContain('Do not run git add or git commit');
     expect(out).toContain('- Do not modify the auth module');
     expect(out).toContain('or stop after 40 turns and summarize remaining work');
     // no feedback section when feedback absent

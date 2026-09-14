@@ -251,6 +251,12 @@ export function buildGoalCondition(args: {
    * limited to 4000 characters"), which would fail every attempt in 0 turns.
    */
   reserve?: number;
+  /**
+   * Who commits: 'worker' (default — the claude worker commits on its branch) or
+   * 'host' (the codex sandbox cannot write the worktree's shared git metadata;
+   * the runner checkpoints the working tree after the run, best effort).
+   */
+  commitPolicy?: 'worker' | 'host';
 }): string {
   const { vision, task, config } = args;
   const GOAL_CONDITION_CAP = Math.max(500, GOAL_CONDITION_CAP_TOTAL - Math.max(0, args.reserve ?? 0));
@@ -284,7 +290,9 @@ export function buildGoalCondition(args: {
     }
     const allGuardrails = [
       'Never push to any remote.',
-      'Commit your work to the current branch with clear messages.',
+      args.commitPolicy === 'host'
+        ? 'Do not run git add or git commit: this sandbox cannot write the repository\'s shared git metadata; leave changes in the working tree and the host checkpoints them after the run.'
+        : 'Commit your work to the current branch with clear messages.',
       ...vision.guardrails,
     ];
     parts.push('Hard constraints:\n' + allGuardrails.map((g) => `- ${g}`).join('\n'));

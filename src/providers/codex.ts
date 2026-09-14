@@ -77,7 +77,7 @@ export const PROMPT_PREFACE =
   // deliberately NOT widened (a writable shared .git would let a hook run
   // unsandboxed in the host checkpoint commit); the host commits instead.
   'Do not run git commit or git add: this sandbox cannot write the repository\'s shared git metadata. ' +
-  'Leave your changes in the working tree; they are committed for you after the run. ' +
+  'Leave your changes in the working tree; the host checkpoints them after the run. ' +
   'If you cannot finish, end with a precise summary of remaining work.';
 
 /** Broad quota/auth failure patterns — applied to the output tail on nonzero exit. */
@@ -488,6 +488,7 @@ export function codexAdapter(config: SurplusConfig, deps: CodexAdapterDeps = {})
         task: args.task,
         config: args.config,
         judgeFeedback: args.judgeFeedback ?? args.task.judgeFeedback ?? null,
+        commitPolicy: 'host',
       }).replace(/^\s*\/goal\s+/i, '');
       const prompt = `${PROMPT_PREFACE}\n\n${condition}`;
 
