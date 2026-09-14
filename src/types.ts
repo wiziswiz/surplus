@@ -42,7 +42,8 @@ export type Provider = 'claude' | 'codex';
  *                      db rows and task/project affinities written before the
  *                      multi-account feature keep their exact meaning.
  *   - 'claude:<id>'  → a non-main claude account (id slug [a-z0-9-]{1,24}).
- *   - 'codex'        → the single codex account.
+ *   - 'codex'        → the main/default codex account (~/.codex or providers.codex.codexHome).
+ *   - 'codex:<id>'   → a non-main codex account (its own CODEX_HOME).
  */
 export type AccountKey = string;
 
@@ -52,7 +53,7 @@ export type AccountKey = string;
  * burning. Stored in TEXT columns — the grammar is
  * 'claude' | 'codex' | 'any' | 'claude:<id>'.
  */
-export type ProviderPref = Provider | 'any' | `claude:${string}`;
+export type ProviderPref = Provider | 'any' | `claude:${string}` | `codex:${string}`;
 
 // ---------------------------------------------------------------------------
 // Usage (per-provider rate-limit windows)
@@ -106,6 +107,20 @@ export interface ClaudeAccountConfig {
   priority: number | null;
 }
 
+/**
+ * One non-default Codex login: a CODEX_HOME directory created with
+ * `CODEX_HOME=<dir> codex login`. 'main' is reserved for the default account
+ * (key 'codex', home = providers.codex.codexHome or ~/.codex).
+ */
+export interface CodexAccountConfig {
+  /** Slug [a-z0-9-]{1,24}. */
+  id: string;
+  label: string;
+  /** CODEX_HOME dir; '~' expands. null only for main. */
+  codexHome: string | null;
+  priority: number | null;
+}
+
 export interface ProviderConfig {
   enabled: boolean;
   defaults: {
@@ -122,12 +137,18 @@ export interface ProviderConfig {
    */
   weeklyResetFallback?: string | null;
   /**
+   * codex only: a CODEX_HOME directory holding a separate Codex CLI login
+   * (`CODEX_HOME=<dir> codex login`) to burn instead of the default ~/.codex
+   * account. '~' is expanded. null = default ~/.codex.
+   */
+  codexHome?: string | null;
+  /**
    * claude only: burnable subscription accounts (max 6). Absent/empty = the
    * single default account [{id:'main', label:'personal', configDir:null,
    * priority:null}]. Enumerate via config.ts resolveAccounts() — never read
    * this raw.
    */
-  accounts?: ClaudeAccountConfig[];
+  accounts?: ClaudeAccountConfig[] | CodexAccountConfig[];
 }
 
 export interface SurplusConfig {

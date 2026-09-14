@@ -358,6 +358,43 @@ describe('codexAdapter.getUsage', () => {
     expect(snap!.fetchedAt).toBe(NOW);
   });
 
+  it('skips a trailing credit-only rate_limits block (null windows) and uses the newest window block', async () => {
+    // codex-cli 0.154+ appends a limit_id "premium" block with primary/secondary
+    // both null after the real window block; it must not mask the real data.
+    const codexHome = await makeCodexHome();
+    const primaryResetSec = Math.floor(NOW / 1000) + 3600;
+    const secondaryResetSec = Math.floor(NOW / 1000) + 4 * 86400;
+    await writeRollout(codexHome, [
+      rolloutLine({ primaryResetSec, secondaryResetSec, secondaryPct: 99, planType: 'pro' }),
+      JSON.stringify({
+        timestamp: '2026-06-08T10:00:06.000Z',
+        type: 'event_msg',
+        payload: {
+          type: 'token_count',
+          info: { model_context_window: 258400 },
+          rate_limits: {
+            limit_id: 'premium',
+            limit_name: null,
+            primary: null,
+            secondary: null,
+            credits: { has_credits: false, unlimited: false, balance: '0' },
+            plan_type: 'pro',
+            rate_limit_reached_type: null,
+          },
+        },
+      }),
+    ]);
+    const adapter = codexAdapter(makeConfig(), {
+      checkCliInstalled: cliPresent,
+      now: () => NOW,
+      codexHome,
+    });
+    const snap = await adapter.getUsage();
+    expect(snap).not.toBeNull();
+    expect(snap!.sevenDayPct).toBe(99);
+    expect(snap!.sevenDayResetsAt!.getTime()).toBe(secondaryResetSec * 1000);
+  });
+
   it('nulls the 5h fields when only the 5h window has already reset', async () => {
     const codexHome = await makeCodexHome();
     await writeRollout(codexHome, [

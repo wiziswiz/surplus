@@ -36,6 +36,7 @@ import { spawn as nodeSpawn } from 'node:child_process';
 import type { ChildProcess, SpawnOptions } from 'node:child_process';
 import { createWriteStream } from 'node:fs';
 import { mkdir, open, readdir, readFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -45,6 +46,7 @@ import {
   prepareWorktree,
 } from '../runner.js';
 import { buildGoalCondition, redactSecrets } from '../vision.js';
+import { resolveAccounts, sanitizeAccountKey, type ResolvedAccount } from '../config.js';
 import type {
   AccountAdapter,
   ProviderAdapter,
@@ -308,7 +310,13 @@ function extractRateLimits(jsonlTail: string): CodexRateLimits | null {
         payload?: { type?: string; rate_limits?: CodexRateLimits | null };
       };
       const payload = obj.payload;
-      if (payload?.type === 'token_count' && payload.rate_limits) return payload.rate_limits;
+      if (payload?.type !== 'token_count' || !payload.rate_limits) continue;
+      // Newer CLIs (0.154+) also emit credit-only blocks (limit_id "premium",
+      // primary/secondary both null) after the real window block. They carry no
+      // window data, so keep scanning backwards for the newest block that does.
+      const rl = payload.rate_limits;
+      if (!rl.primary && !rl.secondary) continue;
+      return rl;
     } catch {
       // Partial first line of the tail window, or a non-JSON line — skip.
     }
@@ -384,7 +392,16 @@ function makeDefaultCliCheck(spawnFn: SpawnFn): () => Promise<boolean> {
 
 export function codexAdapter(config: SurplusConfig, deps: CodexAdapterDeps = {}): ProviderAdapter {
   const now = deps.now ?? Date.now;
-  const codexHome = deps.codexHome ?? join(homedir(), '.codex');
+  // Config-declared CODEX_HOME (a second Codex login) wins over the default
+  // ~/.codex; the test seam `deps.codexHome` wins over both.
+  const configuredHome = config.providers.codex?.codexHome ?? null;
+  const codexHome =
+    deps.codexHome ??
+    (configuredHome ? configuredHome.replace(/^~(?=$|\/)/, homedir()) : join(homedir(), '.codex'));
+  // ALWAYS export the resolved home: probing and spawning must agree on one
+  // absolute CODEX_HOME per account, and an inherited CODEX_HOME in the tick's
+  // environment must never redirect the main account to another login.
+  const codexEnv = { env: { ...process.env, CODEX_HOME: codexHome } };
   const spawnFn: SpawnFn = deps.spawn ?? (nodeSpawn as unknown as SpawnFn);
   const cliInstalled = deps.checkCliInstalled ?? makeDefaultCliCheck(spawnFn);
 
@@ -443,8 +460,15 @@ export function codexAdapter(config: SurplusConfig, deps: CodexAdapterDeps = {})
     const startedAt = now();
     const attempt = Math.max(1, args.task.attempts ?? 1); // claim pre-increments
     await mkdir(args.logsDir, { recursive: true });
-    const logPath = join(args.logsDir, `${args.task.id}-attempt${attempt}-codex.log`);
-    const lastMessagePath = join(args.logsDir, `${args.task.id}-attempt${attempt}-codex.last.txt`);
+    // Output paths carry the account key so two codex accounts (or a refunded
+    // retry on another account) never read each other's saved final message.
+    // …and a per-run tag, because the attempt number is refundable: a refunded
+    // retry on the same account must never read the previous run's saved final
+    // message (a stale quota text would misclassify an infra failure as quota).
+    const acct = args.accountKey ? `-${sanitizeAccountKey(args.accountKey)}` : '';
+    const runTag = randomUUID().slice(0, 8);
+    const logPath = join(args.logsDir, `${args.task.id}-attempt${attempt}-codex${acct}-${runTag}.log`);
+    const lastMessagePath = join(args.logsDir, `${args.task.id}-attempt${attempt}-codex${acct}-${runTag}.last.txt`);
 
     const { worktreePath, branch } = prepareWorktree({
       task: args.task,
@@ -494,6 +518,7 @@ export function codexAdapter(config: SurplusConfig, deps: CodexAdapterDeps = {})
       const child = spawnFn('codex', cliArgs, {
         cwd: worktreePath,
         stdio: ['pipe', 'pipe', 'pipe'],
+        ...codexEnv,
         // argv array, NO shell — nothing is shell-interpolated.
       });
 
@@ -630,21 +655,48 @@ export function codexAdapter(config: SurplusConfig, deps: CodexAdapterDeps = {})
 }
 
 /**
- * The codex AccountAdapter — codex is always a single account with key
- * 'codex' (no profile-dir multiplexing; the codex CLI owns its own auth).
+ * One codex AccountAdapter per resolved codex account. Each account is a
+ * CODEX_HOME (its own `codex login`); the adapter binds it by threading the
+ * home through providers.codex.codexHome on a per-account config clone, so
+ * the usage probe reads that home's rollouts and `codex exec` runs with
+ * CODEX_HOME exported. configDir stays null: the judge always runs on the
+ * default claude profile.
  */
-export function codexAccountAdapter(config: SurplusConfig, deps: CodexAdapterDeps = {}): AccountAdapter {
-  const base = codexAdapter(config, deps);
+export function codexAccountAdapters(config: SurplusConfig, deps: CodexAdapterDeps = {}): AccountAdapter[] {
+  return resolveAccounts(config)
+    .filter((account) => account.provider === 'codex')
+    .map((account) => codexAccountAdapter(config, deps, account));
+}
+
+/**
+ * The codex AccountAdapter for one account (default: the single main account
+ * with key 'codex').
+ */
+export function codexAccountAdapter(
+  config: SurplusConfig,
+  deps: CodexAdapterDeps = {},
+  account?: ResolvedAccount,
+): AccountAdapter {
+  const boundConfig: SurplusConfig = account
+    ? {
+        ...config,
+        providers: {
+          ...config.providers,
+          codex: { ...config.providers.codex, codexHome: account.codexHome },
+        },
+      }
+    : config;
+  const base = codexAdapter(boundConfig, deps);
   return {
-    key: 'codex',
+    key: account?.key ?? 'codex',
     provider: 'codex',
-    label: 'codex',
-    priority: null,
+    label: account?.label ?? 'codex',
+    priority: account?.priority ?? null,
     configDir: null,
     getUsage: (opts?: { fresh?: boolean }) => {
       void opts; // codex usage is probed from local rollouts — no fresh-vs-cached split
       return base.getUsage();
     },
-    runTask: (args: RunTaskArgs) => base.runTask(args),
+    runTask: (args: RunTaskArgs) => base.runTask({ ...args, accountKey: account?.key ?? 'codex' }),
   };
 }

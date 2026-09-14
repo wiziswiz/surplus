@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { assertAccountsResolvable } from '../src/config.js';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import * as http from 'node:http';
@@ -237,6 +238,33 @@ describe('buildConfigPatch', () => {
   });
 });
 
+describe('buildConfigPatch — providers.codex (codexHome + accounts)', () => {
+  it('accepts codexHome (null or ~/absolute) and a codex account list', () => {
+    expect(buildConfigPatch({ providers: { codex: { codexHome: null } } }).ok).toBe(true);
+    expect(buildConfigPatch({ providers: { codex: { codexHome: '~/.surplus/profiles/codex2' } } }).ok).toBe(true);
+    const r = buildConfigPatch({
+      providers: {
+        codex: {
+          accounts: [
+            { id: 'main', label: 'primary', codexHome: null, priority: null },
+            { id: 'council', label: 'Pro', codexHome: '~/.surplus/profiles/codex2', priority: 1 },
+          ],
+        },
+      },
+    });
+    expect(r.ok).toBe(true);
+  });
+
+  it('rejects a non-main codex account without a codexHome, duplicate homes, relative paths and unknown keys', () => {
+    const bad = (accounts: unknown) => buildConfigPatch({ providers: { codex: { accounts } } });
+    expect(bad([{ id: 'x', label: 'x', codexHome: null, priority: null }]).ok).toBe(false);
+    expect(bad([{ id: 'a', label: 'a', codexHome: '~/h' }, { id: 'b', label: 'b', codexHome: '~/h' }]).ok).toBe(false);
+    expect(bad([{ id: 'a', label: 'a', codexHome: 'relative/dir' }]).ok).toBe(false);
+    expect(bad([{ id: 'a', label: 'a', codexHome: '~/h', configDir: '~/x' }]).ok).toBe(false);
+    expect(buildConfigPatch({ providers: { codex: { codexHome: 'relative' } } }).ok).toBe(false);
+  });
+});
+
 describe('buildConfigPatch — providers.claude.accounts', () => {
   const acct = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
     id: 'work',
@@ -387,7 +415,10 @@ beforeAll(async () => {
       },
       updateConfig: (patch) => {
         configPatches.push(patch);
-        return applyConfigPatch(serverConfig, patch);
+        // Mirrors the CLI: validate the exact merged object before it is "persisted".
+        const next = applyConfigPatch(serverConfig, patch);
+        assertAccountsResolvable(next);
+        return next;
       },
     },
     signal: ac.signal,
@@ -829,6 +860,27 @@ describe('PATCH /api/config', () => {
       });
       expect(res.status).toBe(400);
     }
+  });
+
+  it('accepts codex accounts, but refuses a patch whose merged config would drop a declared codex account (home collision)', async () => {
+    const ok = await fetch(`${BASE}/api/config`, {
+      method: 'PATCH',
+      body: JSON.stringify({ providers: { codex: { accounts: [
+        { id: 'main', label: 'primary', codexHome: null, priority: null },
+        { id: 'work', label: 'Work', codexHome: '~/review-work', priority: null },
+      ] } } }),
+    });
+    expect(ok.status).toBe(200);
+    // Now point the provider default home at work's home: main would resolve to the same
+    // dir as work, the resolver would drop work, and its affinities would be widened.
+    const collide = await fetch(`${BASE}/api/config`, {
+      method: 'PATCH',
+      body: JSON.stringify({ providers: { codex: { codexHome: '~/review-work' } } }),
+    });
+    expect(collide.status).toBe(400);
+    expect(((await collide.json()) as { error: string }).error).toMatch(/'work' would be dropped/);
+    // Restore for later tests.
+    await fetch(`${BASE}/api/config`, { method: 'PATCH', body: JSON.stringify({ providers: { codex: { codexHome: null, accounts: [] } } }) });
   });
 
   it('deep-merges, persists via updateConfig, and reflects in /api/state', async () => {

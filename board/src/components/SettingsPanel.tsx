@@ -447,7 +447,7 @@ function AccountsSection({
   onSaved: (cfg: ConfigDto) => void;
 }) {
   const [accounts, setAccounts] = useState<ClaudeAccountDto[]>(() => {
-    const declared = config.providers.claude.accounts;
+    const declared = config.providers.claude.accounts as ClaudeAccountDto[] | undefined;
     return declared && declared.length > 0 ? declared : defaultAccounts();
   });
   const [prioDrafts, setPrioDrafts] = useState<Record<string, string>>({});
@@ -471,7 +471,7 @@ function AccountsSection({
     setSaved(false);
     try {
       const effective = await patchConfig({ providers: { claude: { accounts: next } } });
-      setAccounts(effective.providers.claude.accounts ?? next);
+      setAccounts((effective.providers.claude.accounts as ClaudeAccountDto[] | undefined) ?? next);
       onSaved(effective);
       setSaved(true);
       return true;

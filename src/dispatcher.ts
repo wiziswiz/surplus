@@ -32,6 +32,8 @@ export interface JudgeRunArgs {
   project: ProjectRow;
   vision: Vision;
   result: RunnerResult;
+  /** The burning account's CLAUDE_CONFIG_DIR so the judge bills the same subscription; null = default profile. */
+  configDir: string | null;
   config: SurplusConfig;
 }
 
@@ -91,6 +93,10 @@ const JUDGE_SKIP: ReadonlySet<RunOutcome> = new Set([
  * every tick forever, never blocking. Reset to 0 on any non-infra outcome.
  */
 const INFRA_STREAK_CAP = 3;
+/** A run killed from outside (SIGTERM/143) is refunded but not re-launched at once: the task waits this long. */
+const KILLED_BACKOFF_MS = 5 * 60_000;
+/** Consecutive external kills refunded before the kill starts counting against maxAttempts. */
+const KILLED_STREAK_CAP = 3;
 
 const AUTH_ERROR_RE = /quota|rate.?limit|401|authentication|expired/i;
 
@@ -375,7 +381,7 @@ async function runOne(
   let verdict: JudgeVerdict | null = null;
   if (!JUDGE_SKIP.has(result.outcome)) {
     try {
-      verdict = await deps.judgeRun({ task, project, vision, result, config: deps.config });
+      verdict = await deps.judgeRun({ task, project, vision, result, config: deps.config, configDir: account.configDir });
     } catch (err) {
       verdict = { score: 0, reasons: `judge failed: ${redact(errMessage(err))}`, missing: '' };
     }
@@ -457,19 +463,29 @@ async function runOne(
     // refund the claim-time attempt increment: the watchdog is DESIGNED to
     // fire near ceilings, and three routine clips must not permanently block
     // a task that never failed on the merits.
+    // External kills are refunded only for a bounded streak (tracked in the
+    // same consecutive-non-completion counter infra uses): a killer that recurs
+    // on every launch must eventually exhaust maxAttempts instead of starving
+    // lower-priority tasks forever.
+    const killed = result.outcome === 'killed';
+    const killedStreak = killed ? (fresh.consecutiveInfra ?? 0) + 1 : 0;
     const interrupted =
-      verdict === null && (result.outcome === 'quota' || result.outcome === 'killed');
+      verdict === null &&
+      (result.outcome === 'quota' || (killed && killedStreak < KILLED_STREAK_CAP));
     const blocked = !interrupted && fresh.attempts >= fresh.maxAttempts;
     db.updateTask(task.id, {
       status: blocked ? 'blocked' : 'ready',
       ...(interrupted ? { attempts: Math.max(0, fresh.attempts - 1) } : {}),
-      consecutiveInfra: 0,
+      // An external kill is refunded, but re-launching it immediately would spin
+      // inside one tick if the killer recurs — back the task off instead.
+      ...(killed && !blocked ? { scheduledAt: Date.now() + KILLED_BACKOFF_MS } : {}),
+      consecutiveInfra: killedStreak,
       judgeFeedback: buildFeedback(verdict, result, fresh.judgeFeedback),
     });
     log(
       `dispatch: task ${task.id} ${blocked ? 'blocked' : 'requeued'} ` +
-        `(attempt ${fresh.attempts}/${fresh.maxAttempts}${interrupted ? ', refunded' : ''}, ` +
-        `outcome ${finalOutcome})`,
+        `(attempt ${fresh.attempts}/${fresh.maxAttempts}${interrupted ? ', refunded' : ''}` +
+        `${killed ? `, kill streak ${killedStreak}/${KILLED_STREAK_CAP}` : ''}, outcome ${finalOutcome})`,
     );
   }
 
@@ -480,6 +496,7 @@ async function runOne(
   const respawnGuard =
     result.outcome === 'quota' ||
     result.outcome === 'infra' ||
+    result.outcome === 'killed' ||
     (result.outcome === 'error' && AUTH_ERROR_RE.test(result.summary ?? ''));
 
   return { outcome: finalOutcome, respawnGuard };

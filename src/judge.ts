@@ -63,6 +63,12 @@ export interface JudgeRunArgs {
   judgeModel: string;
   projectPath: string;
   /**
+   * CLAUDE_CONFIG_DIR for the judge process (the account that ran the task, so
+   * the grading pass bills the same subscription). null/absent = default profile.
+   * Codex runs pass null: the judge always runs on claude.
+   */
+  configDir?: string | null;
+  /**
    * Where the judge creates its ephemeral verify worktree (judge-<taskId>).
    * Threaded from config (~/.surplus/worktrees); defaults to it when absent so
    * a missing arg never collides with a live run's worktree under <task.id>.
@@ -473,7 +479,12 @@ function buildJudgePrompt(args: JudgeRunArgs, verifyResults: VerifyResult[]): st
   ].join('\n');
 }
 
-function runJudgeProcess(prompt: string, judgeModel: string, cwd: string): Promise<string> {
+function runJudgeProcess(
+  prompt: string,
+  judgeModel: string,
+  cwd: string,
+  configDir?: string | null,
+): Promise<string> {
   return new Promise<string>((resolve, reject) => {
     const argv = [
       '-p',
@@ -487,7 +498,12 @@ function runJudgeProcess(prompt: string, judgeModel: string, cwd: string): Promi
       'json',
       prompt,
     ];
-    const child = spawn('claude', argv, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn('claude', argv, {
+      cwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      // Only CLAUDE_CONFIG_DIR is overridden (never a secret) — mirrors runner.ts.
+      ...(configDir != null ? { env: { ...process.env, CLAUDE_CONFIG_DIR: configDir } } : {}),
+    });
 
     let stdout = '';
     let stderrTail = '';
@@ -585,7 +601,7 @@ export async function judgeRun(args: JudgeRunArgs): Promise<JudgeVerdict> {
     // runVerifyCommands never throws; empty when no verify commands are declared.
     const verifyResults = await runVerifyCommands(args);
     const prompt = buildJudgePrompt(args, verifyResults);
-    const stdout = await runJudgeProcess(prompt, judgeModel, args.projectPath);
+    const stdout = await runJudgeProcess(prompt, judgeModel, args.projectPath, args.configDir);
     const envelope = parseClaudeEnvelope(stdout);
     const resultText = envelope.result ?? stdout;
     return parseVerdict(resultText);

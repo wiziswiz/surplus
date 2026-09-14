@@ -16,7 +16,7 @@ import * as path from 'node:path';
 import type { RunOutcome, RunnerResult, RunTaskArgs, TaskRow } from './types.js';
 import { sanitizeAccountKey } from './config.js';
 import { buildGoalCondition, redactSecrets } from './vision.js';
-import { resolveRolesPlan } from './roles.js';
+import { resolveRolesPlan, rolesGoalPreamble } from './roles.js';
 
 const QUOTA_RE = /rate.?limit|quota|overloaded|\b429\b|401|authentication|expired/i;
 // CONNECTION-LEVEL transient failures only (lost API connection / network blip /
@@ -176,8 +176,11 @@ export function classifyClaudeOutcome(c: ClaudeOutcomeInputs): RunOutcome {
     outcome = 'error';
   } else if (c.code === 0) {
     outcome = c.isError === true ? 'error' : 'failed';
-  } else if (c.signal === 'SIGTERM' || c.signal === 'SIGKILL') {
-    outcome = 'killed'; // external stop (user pause / system)
+  } else if (c.signal === 'SIGTERM' || c.signal === 'SIGKILL' || c.code === 143 || c.code === 137) {
+    // External stop (user pause / system). Claude Code traps SIGTERM/SIGKILL-adjacent
+    // shutdowns and exits 143/137 itself, so the signal field is null — treat the
+    // shell-convention exit codes the same way rather than burning an attempt as 'error'.
+    outcome = 'killed';
   } else {
     outcome = 'error';
   }
@@ -473,13 +476,6 @@ export async function runTask(args: RunTaskArgs): Promise<RunnerResult> {
     };
   }
 
-  const condition = buildGoalCondition({
-    vision,
-    task,
-    config,
-    judgeFeedback: args.judgeFeedback ?? null,
-  });
-
   // EXPERIMENTAL model roles (config.roles): run as a smart orchestrator that
   // delegates to a cheaper executor subagent. Absent/invalid roles → the plan is
   // the base model + tools + condition, byte-for-byte the standard path. Model
@@ -495,6 +491,17 @@ export async function runTask(args: RunTaskArgs): Promise<RunnerResult> {
       executor = null; // invalid role model → disable roles, never break the run
     }
   }
+
+  // The roles preamble is prepended to the condition AFTER the cap, so reserve
+  // room for it: Claude Code hard-rejects a /goal condition over 4000 chars.
+  const rolesReserve = executor ? rolesGoalPreamble(executor).length + 8 : 0;
+  const condition = buildGoalCondition({
+    vision,
+    task,
+    config,
+    judgeFeedback: args.judgeFeedback ?? null,
+    reserve: rolesReserve,
+  });
   const plan = resolveRolesPlan({
     baseModel: model,
     baseAllowedTools: 'Bash(*) Edit Write WebFetch WebSearch',

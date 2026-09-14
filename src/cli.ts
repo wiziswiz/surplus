@@ -36,15 +36,14 @@ import {
   configPath,
   surplusDir,
   addClaudeAccount,
-  worktreesDir as worktreesDirPath,
-} from './config.js';
+  worktreesDir as worktreesDirPath, assertAccountsResolvable } from './config.js';
 import { decide } from './decide.js';
 import { openDb } from './db.js';
 import type { SurplusDb, TaskPatch } from './db.js';
 import { dispatchTick } from './dispatcher.js';
 import type { DispatchDeps, DispatchResult } from './dispatcher.js';
 import { claudeAccountAdapters } from './providers/claude.js';
-import { codexAccountAdapter } from './providers/codex.js';
+import { codexAccountAdapters } from './providers/codex.js';
 import { parseVision, draftVision, scaffoldProject as scaffoldProjectDir } from './vision.js';
 import { judgeRun } from './judge.js';
 import { startServer, applyConfigPatch } from './server.js';
@@ -64,7 +63,7 @@ const VERSION = '0.1.0';
 const TASK_STATUSES: TaskStatus[] = ['triage', 'todo', 'ready', 'running', 'blocked', 'done', 'archived'];
 
 /** Task/project affinity grammar: provider, 'any', or a claude account key. */
-const PROVIDER_PREF_RE = /^(claude|codex|any|claude:[a-z0-9-]{1,24})$/;
+const PROVIDER_PREF_RE = /^(claude|codex|any|(claude|codex):[a-z0-9-]{1,24})$/;
 
 // ---------------------------------------------------------------------------
 // Shared deps (built once per action, never at import time)
@@ -94,7 +93,7 @@ function buildDeps(nowFn: () => number = () => Date.now()): CliDeps {
   // keeps key 'claude'), plus the single codex account when enabled.
   const accounts: AccountAdapter[] = [
     ...claudeAccountAdapters(config),
-    ...(config.providers.codex.enabled ? [codexAccountAdapter(config)] : []),
+    ...codexAccountAdapters(config),
   ];
   return {
     db,
@@ -113,6 +112,7 @@ function buildDeps(nowFn: () => number = () => Date.now()): CliDeps {
         },
         judgeModel: config.judge.model,
         projectPath: args.project.path,
+        configDir: args.configDir,
         // Ephemeral judge worktree lives under ~/.surplus/worktrees as
         // judge-<taskId> (distinct from the live run's <taskId> worktree).
         worktreesDir: worktreesDirPath(),
@@ -136,9 +136,10 @@ function buildDeps(nowFn: () => number = () => Date.now()): CliDeps {
  * never matches an unknown key, and nothing warns).
  */
 function assertKnownProviderPref(deps: CliDeps, pref: ProviderPref): void {
-  if (!pref.startsWith('claude:')) return;
+  if (!pref.includes(':')) return;
   if (!deps.accounts.some((a) => a.key === pref)) {
-    throw new Error(`unknown claude account '${pref}' — add it to providers.claude.accounts first`);
+    const provider = pref.split(':')[0];
+    throw new Error(`unknown ${provider} account '${pref}' — add it to providers.${provider}.accounts first`);
   }
 }
 
@@ -308,10 +309,10 @@ function wrap<A extends unknown[]>(
 
 /** Affinity option validating the extended grammar (claude|codex|any|claude:<id>). */
 const providerPrefOption = (description: string) =>
-  new Option('--provider <provider>', `${description} (claude|codex|any|claude:<account-id>)`)
+  new Option('--provider <provider>', `${description} (claude|codex|any|claude:<account-id>|codex:<account-id>)`)
     .argParser((value: string): ProviderPref => {
       if (!PROVIDER_PREF_RE.test(value)) {
-        throw new InvalidArgumentError('must be claude, codex, any, or claude:<account-id>');
+        throw new InvalidArgumentError('must be claude, codex, any, claude:<account-id>, or codex:<account-id>');
       }
       return value as ProviderPref;
     })
@@ -872,6 +873,9 @@ program
           triggerBurn,
           updateConfig: (patch: ConfigPatch) => {
             const next = applyConfigPatch(loadConfig(), patch);
+            // Authoritative check on the freshly merged on-disk config — the
+            // board's in-memory copy may lag a hand edit of config.json.
+            assertAccountsResolvable(next);
             saveConfig(next);
             // Rebuild the live account adapters IN PLACE (the array reference
             // is shared with startServer and triggerBurn) so account
@@ -883,7 +887,7 @@ program
               0,
               deps.accounts.length,
               ...claudeAccountAdapters(next),
-              ...(next.providers.codex.enabled ? [codexAccountAdapter(next)] : []),
+              ...codexAccountAdapters(next),
             );
             return next;
           },

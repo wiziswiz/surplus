@@ -19,6 +19,8 @@ import {
   setPaused,
   surplusDir,
   worktreesDir,
+  assertAccountsResolvable,
+  ConfigValidationError,
 } from '../src/config.js';
 import type { ClaudeAccountConfig, SurplusConfig } from '../src/types.js';
 
@@ -45,6 +47,7 @@ describe('defaultConfig', () => {
       enabled: false,
       defaults: { model: 'gpt-5.5', effort: 'high' },
       weeklyResetFallback: null,
+        codexHome: null,
     });
     expect(c.modes.weeklySurplus).toEqual({ enabled: true, burnWindowHours: 12, stopAtPct: 95 });
     expect(c.modes.fiveHourBurst).toEqual({
@@ -264,10 +267,44 @@ function configWithAccounts(
   return c;
 }
 
+describe('assertAccountsResolvable', () => {
+  it('passes a clean config and throws ConfigValidationError when a declared account would be dropped', () => {
+    const cfg = defaultConfig();
+    cfg.providers.codex.accounts = [
+      { id: 'main', label: 'primary', codexHome: null, priority: null },
+      { id: 'work', label: 'Work', codexHome: '~/review-work', priority: null },
+    ];
+    expect(() => assertAccountsResolvable(cfg)).not.toThrow();
+    cfg.providers.codex.codexHome = '~/review-work'; // main now resolves to work's home
+    expect(() => assertAccountsResolvable(cfg)).toThrow(ConfigValidationError);
+    expect(() => assertAccountsResolvable(cfg)).toThrow(/'work' would be dropped/);
+    cfg.providers.codex.enabled = false; // disabled is not removed — still validated
+    expect(() => assertAccountsResolvable(cfg)).toThrow(ConfigValidationError);
+  });
+});
+
 describe('resolveAccounts', () => {
+  it('enumerates codex accounts by CODEX_HOME: main keeps key "codex", others get codex:<id>, duplicates and default-home non-main entries are skipped', () => {
+    const cfg = defaultConfig();
+    cfg.providers.codex.enabled = true;
+    cfg.providers.codex.accounts = [
+      { id: 'main', label: 'primary', codexHome: null, priority: null },
+      { id: 'council', label: 'Pro', codexHome: '~/.surplus/profiles/codex2', priority: 1 },
+      { id: 'dupe', label: 'dupe', codexHome: '~/.surplus/profiles/codex2', priority: null },
+      { id: 'bad', label: 'bad', codexHome: null, priority: null },
+    ];
+    const codex = resolveAccounts(cfg).filter((a) => a.provider === 'codex');
+    expect(codex.map((a) => a.key)).toEqual(['codex', 'codex:council']);
+    expect(codex[0]!.codexHome).toBeNull();
+    expect(codex[1]!.codexHome).toMatch(/\/.surplus\/profiles\/codex2$/);
+    expect(codex[1]!.label).toBe('Pro');
+    expect(codex[1]!.priority).toBe(1);
+    expect(codex.every((a) => a.configDir === null)).toBe(true);
+  });
+
   it('defaults to the single main account (key "claude") when accounts is absent', () => {
     expect(resolveAccounts(configWithAccounts(undefined))).toEqual([
-      { key: 'claude', provider: 'claude', id: 'main', label: 'personal', configDir: null, priority: null },
+      { key: 'claude', provider: 'claude', id: 'main', label: 'personal', configDir: null, priority: null, codexHome: null },
     ]);
   });
 
@@ -316,7 +353,7 @@ describe('resolveAccounts', () => {
       configWithAccounts([{ id: 'NOPE!', label: 'x', configDir: null, priority: null }]),
     );
     expect(fallback).toEqual([
-      { key: 'claude', provider: 'claude', id: 'main', label: 'personal', configDir: null, priority: null },
+      { key: 'claude', provider: 'claude', id: 'main', label: 'personal', configDir: null, priority: null, codexHome: null },
     ]);
   });
 
