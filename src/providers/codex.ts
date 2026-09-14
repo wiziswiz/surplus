@@ -72,6 +72,12 @@ const MAX_ROLLOUT_FILES_SCANNED = 20;
 export const PROMPT_PREFACE =
   'Work autonomously until the following completion condition is fully satisfied. ' +
   'Run the verify commands yourself and show their output. ' +
+  // The worktree's index and refs live under the main repo's .git, outside the
+  // workspace-write sandbox, so `git commit` fails on index.lock. The sandbox is
+  // deliberately NOT widened (a writable shared .git would let a hook run
+  // unsandboxed in the host checkpoint commit); the host commits instead.
+  'Do not run git commit or git add: this sandbox cannot write the repository\'s shared git metadata. ' +
+  'Leave your changes in the working tree; they are committed for you after the run. ' +
   'If you cannot finish, end with a precise summary of remaining work.';
 
 /** Broad quota/auth failure patterns — applied to the output tail on nonzero exit. */
