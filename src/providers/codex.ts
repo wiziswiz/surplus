@@ -45,6 +45,7 @@ import {
   prepareWorktree,
 } from '../runner.js';
 import { buildGoalCondition, redactSecrets } from '../vision.js';
+import { resolveAccounts, type ResolvedAccount } from '../config.js';
 import type {
   AccountAdapter,
   ProviderAdapter,
@@ -644,16 +645,43 @@ export function codexAdapter(config: SurplusConfig, deps: CodexAdapterDeps = {})
 }
 
 /**
- * The codex AccountAdapter — codex is always a single account with key
- * 'codex' (no profile-dir multiplexing; the codex CLI owns its own auth).
+ * One codex AccountAdapter per resolved codex account. Each account is a
+ * CODEX_HOME (its own `codex login`); the adapter binds it by threading the
+ * home through providers.codex.codexHome on a per-account config clone, so
+ * the usage probe reads that home's rollouts and `codex exec` runs with
+ * CODEX_HOME exported. configDir stays null: the judge always runs on the
+ * default claude profile.
  */
-export function codexAccountAdapter(config: SurplusConfig, deps: CodexAdapterDeps = {}): AccountAdapter {
-  const base = codexAdapter(config, deps);
+export function codexAccountAdapters(config: SurplusConfig, deps: CodexAdapterDeps = {}): AccountAdapter[] {
+  return resolveAccounts(config)
+    .filter((account) => account.provider === 'codex')
+    .map((account) => codexAccountAdapter(config, deps, account));
+}
+
+/**
+ * The codex AccountAdapter for one account (default: the single main account
+ * with key 'codex').
+ */
+export function codexAccountAdapter(
+  config: SurplusConfig,
+  deps: CodexAdapterDeps = {},
+  account?: ResolvedAccount,
+): AccountAdapter {
+  const boundConfig: SurplusConfig = account
+    ? {
+        ...config,
+        providers: {
+          ...config.providers,
+          codex: { ...config.providers.codex, codexHome: account.codexHome },
+        },
+      }
+    : config;
+  const base = codexAdapter(boundConfig, deps);
   return {
-    key: 'codex',
+    key: account?.key ?? 'codex',
     provider: 'codex',
-    label: 'codex',
-    priority: null,
+    label: account?.label ?? 'codex',
+    priority: account?.priority ?? null,
     configDir: null,
     getUsage: (opts?: { fresh?: boolean }) => {
       void opts; // codex usage is probed from local rollouts — no fresh-vs-cached split

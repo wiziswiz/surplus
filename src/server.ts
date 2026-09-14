@@ -128,8 +128,8 @@ const PROVIDERS: readonly Provider[] = ['claude', 'codex'];
 const PROVIDER_PREFS: readonly ProviderPref[] = ['claude', 'codex', 'any'];
 /** Account id slug ('main' reserved for the default claude account). */
 const ACCOUNT_ID_RE = /^[a-z0-9-]{1,24}$/;
-/** Non-main claude account affinity: 'claude:<id>'. */
-const CLAUDE_ACCOUNT_KEY_RE = /^claude:[a-z0-9-]{1,24}$/;
+/** Non-main account affinity: 'claude:<id>' | 'codex:<id>'. */
+const CLAUDE_ACCOUNT_KEY_RE = /^(claude|codex):[a-z0-9-]{1,24}$/;
 const TASK_STATUSES: readonly TaskStatus[] = [
   'triage', 'todo', 'ready', 'running', 'blocked', 'done', 'archived',
 ];
@@ -597,7 +597,8 @@ export async function startServer(opts: StartServerOptions): Promise<void> {
     if (typeof pref !== 'string' || !CLAUDE_ACCOUNT_KEY_RE.test(pref)) return null;
     const known =
       accounts.some((a) => a.key === pref) || resolveAccounts(config).some((a) => a.key === pref);
-    return known ? null : `unknown claude account '${pref}' — not in providers.claude.accounts`;
+    const provider = pref.split(':')[0];
+    return known ? null : `unknown ${provider} account '${pref}' — not in providers.${provider}.accounts`;
   }
 
   // --- shared state builders ------------------------------------------------
@@ -1025,7 +1026,7 @@ export async function startServer(opts: StartServerOptions): Promise<void> {
       const knownKeys = new Set(resolveAccounts(effective).map((a) => a.key));
       for (const t of db.listTasks()) {
         if (CLAUDE_ACCOUNT_KEY_RE.test(t.provider) && !knownKeys.has(t.provider)) {
-          db.updateTask(t.id, { provider: 'claude', updatedAt: Date.now() });
+          db.updateTask(t.id, { provider: t.provider.split(':')[0] as Provider, updatedAt: Date.now() });
           db.appendEvent('task-updated', t.id, {
             fields: ['provider'],
             reason: `account '${t.provider}' removed — affinity reset to claude`,
@@ -1034,7 +1035,7 @@ export async function startServer(opts: StartServerOptions): Promise<void> {
       }
       for (const p of db.listProjects()) {
         if (CLAUDE_ACCOUNT_KEY_RE.test(p.provider) && !knownKeys.has(p.provider)) {
-          db.updateProject(p.id, { provider: 'claude' });
+          db.updateProject(p.id, { provider: p.provider.split(':')[0] as Provider });
           db.appendEvent('task-updated', null, {
             fields: ['provider'],
             projectId: p.id,

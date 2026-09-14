@@ -458,7 +458,13 @@ example (strip comments; the real file is plain JSON):
       "weeklyResetFallback": null,
       // Optional: a second Codex login to burn instead of ~/.codex — create it
       // with `CODEX_HOME=~/.surplus/profiles/codex2 codex login`. null = ~/.codex.
-      "codexHome": null
+      "codexHome": null,
+      // Optional: burn SEVERAL ChatGPT subscriptions. Each entry is one CODEX_HOME
+      // ('main' = the default above). Pin tasks with `--provider codex:<id>`.
+      "accounts": [
+        { "id": "main", "label": "primary", "codexHome": null, "priority": null },
+        { "id": "work", "label": "Work Pro", "codexHome": "~/.surplus/profiles/codex-work", "priority": null }
+      ]
     }
   },
   "modes": {

@@ -18,6 +18,7 @@ import {
   SURPLUS_DIR_NAME,
   WORKTREES_DIR,
   type ClaudeAccountConfig,
+  type CodexAccountConfig,
   type Provider,
   type SurplusConfig,
 } from './types.js';
@@ -119,7 +120,7 @@ export function addClaudeAccount(
       ...config,
       providers: {
         ...config.providers,
-        claude: { ...config.providers.claude, accounts: [...accounts, entry] },
+        claude: { ...config.providers.claude, accounts: [...accounts, entry] as ClaudeAccountConfig[] },
       },
     },
   };
@@ -141,6 +142,8 @@ export interface ResolvedAccount {
   configDir: string | null;
   /** Manual burn order (lower = preferred); null = auto. */
   priority: number | null;
+  /** codex only: resolved CODEX_HOME ('~' expanded); null = default ~/.codex. Always null for claude. */
+  codexHome: string | null;
 }
 
 /** Expand a leading '~' to the home directory. */
@@ -180,7 +183,7 @@ export function resolveAccounts(config: SurplusConfig): ResolvedAccount[] {
   const out: ResolvedAccount[] = [];
 
   if (config.providers.claude.enabled) {
-    const declared = config.providers.claude.accounts;
+    const declared = config.providers.claude.accounts as ClaudeAccountConfig[] | undefined;
     const accounts = Array.isArray(declared) && declared.length > 0 ? declared : defaultClaudeAccounts();
     const defaultDir = defaultClaudeDir();
     const seenIds = new Set<string>();
@@ -212,6 +215,7 @@ export function resolveAccounts(config: SurplusConfig): ResolvedAccount[] {
           typeof account.priority === 'number' && Number.isFinite(account.priority)
             ? account.priority
             : null,
+        codexHome: null,
       });
     }
     // Multi-account: pin main's default (null) configDir to the explicit
@@ -236,19 +240,67 @@ export function resolveAccounts(config: SurplusConfig): ResolvedAccount[] {
         label: 'personal',
         configDir: null,
         priority: null,
+        codexHome: null,
       });
     }
   }
 
   if (config.providers.codex.enabled) {
-    out.push({
-      key: 'codex',
-      provider: 'codex',
-      id: 'codex',
-      label: 'codex',
-      configDir: null,
-      priority: null,
-    });
+    // Default home: providers.codex.codexHome (a second login) or ~/.codex.
+    const providerHome = config.providers.codex.codexHome;
+    const mainHome =
+      typeof providerHome === 'string' && providerHome.trim() !== ''
+        ? resolve(expandTilde(providerHome.trim()))
+        : null;
+    const defaultCodexDir = resolve(join(homedir(), '.codex'));
+    const declared = config.providers.codex.accounts as CodexAccountConfig[] | undefined;
+    const accounts =
+      Array.isArray(declared) && declared.length > 0
+        ? declared
+        : [{ id: 'main', label: 'codex', codexHome: null, priority: null }];
+    const seenIds = new Set<string>();
+    const seenHomes = new Set<string>();
+    const codexOut: ResolvedAccount[] = [];
+    for (const account of accounts) {
+      if (codexOut.length >= MAX_CLAUDE_ACCOUNTS) break;
+      const id = typeof account?.id === 'string' ? account.id : '';
+      if (!ACCOUNT_ID_RE.test(id) || seenIds.has(id)) continue;
+      const rawHome = typeof account.codexHome === 'string' ? account.codexHome.trim() : '';
+      let codexHome = rawHome === '' ? null : resolve(expandTilde(rawHome));
+      if (id === 'main' && codexHome === null) codexHome = mainHome;
+      // A non-main entry must name its OWN home — the default ~/.codex is the
+      // main login again and would burn one subscription under two keys.
+      if (id !== 'main' && (codexHome === null || codexHome === defaultCodexDir)) continue;
+      const homeKey = codexHome ?? defaultCodexDir;
+      if (seenHomes.has(homeKey)) continue;
+      seenIds.add(id);
+      seenHomes.add(homeKey);
+      codexOut.push({
+        key: id === 'main' ? 'codex' : `codex:${id}`,
+        provider: 'codex',
+        id,
+        label:
+          typeof account.label === 'string' && account.label.trim() !== '' ? account.label.trim() : id,
+        configDir: null, // never a CLAUDE_CONFIG_DIR — the judge stays on the default claude profile
+        priority:
+          typeof account.priority === 'number' && Number.isFinite(account.priority)
+            ? account.priority
+            : null,
+        codexHome,
+      });
+    }
+    if (codexOut.length === 0) {
+      codexOut.push({
+        key: 'codex',
+        provider: 'codex',
+        id: 'main',
+        label: 'codex',
+        configDir: null,
+        priority: null,
+        codexHome: mainHome,
+      });
+    }
+    out.push(...codexOut);
   }
 
   return out;
