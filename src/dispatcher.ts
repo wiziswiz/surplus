@@ -95,6 +95,8 @@ const JUDGE_SKIP: ReadonlySet<RunOutcome> = new Set([
 const INFRA_STREAK_CAP = 3;
 /** A run killed from outside (SIGTERM/143) is refunded but not re-launched at once: the task waits this long. */
 const KILLED_BACKOFF_MS = 5 * 60_000;
+/** Consecutive external kills refunded before the kill starts counting against maxAttempts. */
+const KILLED_STREAK_CAP = 3;
 
 const AUTH_ERROR_RE = /quota|rate.?limit|401|authentication|expired/i;
 
@@ -461,22 +463,29 @@ async function runOne(
     // refund the claim-time attempt increment: the watchdog is DESIGNED to
     // fire near ceilings, and three routine clips must not permanently block
     // a task that never failed on the merits.
+    // External kills are refunded only for a bounded streak (tracked in the
+    // same consecutive-non-completion counter infra uses): a killer that recurs
+    // on every launch must eventually exhaust maxAttempts instead of starving
+    // lower-priority tasks forever.
+    const killed = result.outcome === 'killed';
+    const killedStreak = killed ? (fresh.consecutiveInfra ?? 0) + 1 : 0;
     const interrupted =
-      verdict === null && (result.outcome === 'quota' || result.outcome === 'killed');
+      verdict === null &&
+      (result.outcome === 'quota' || (killed && killedStreak < KILLED_STREAK_CAP));
     const blocked = !interrupted && fresh.attempts >= fresh.maxAttempts;
     db.updateTask(task.id, {
       status: blocked ? 'blocked' : 'ready',
       ...(interrupted ? { attempts: Math.max(0, fresh.attempts - 1) } : {}),
       // An external kill is refunded, but re-launching it immediately would spin
       // inside one tick if the killer recurs — back the task off instead.
-      ...(result.outcome === 'killed' ? { scheduledAt: Date.now() + KILLED_BACKOFF_MS } : {}),
-      consecutiveInfra: 0,
+      ...(killed && !blocked ? { scheduledAt: Date.now() + KILLED_BACKOFF_MS } : {}),
+      consecutiveInfra: killedStreak,
       judgeFeedback: buildFeedback(verdict, result, fresh.judgeFeedback),
     });
     log(
       `dispatch: task ${task.id} ${blocked ? 'blocked' : 'requeued'} ` +
-        `(attempt ${fresh.attempts}/${fresh.maxAttempts}${interrupted ? ', refunded' : ''}, ` +
-        `outcome ${finalOutcome})`,
+        `(attempt ${fresh.attempts}/${fresh.maxAttempts}${interrupted ? ', refunded' : ''}` +
+        `${killed ? `, kill streak ${killedStreak}/${KILLED_STREAK_CAP}` : ''}, outcome ${finalOutcome})`,
     );
   }
 

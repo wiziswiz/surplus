@@ -45,7 +45,7 @@ import {
   prepareWorktree,
 } from '../runner.js';
 import { buildGoalCondition, redactSecrets } from '../vision.js';
-import { resolveAccounts, type ResolvedAccount } from '../config.js';
+import { resolveAccounts, sanitizeAccountKey, type ResolvedAccount } from '../config.js';
 import type {
   AccountAdapter,
   ProviderAdapter,
@@ -459,8 +459,11 @@ export function codexAdapter(config: SurplusConfig, deps: CodexAdapterDeps = {})
     const startedAt = now();
     const attempt = Math.max(1, args.task.attempts ?? 1); // claim pre-increments
     await mkdir(args.logsDir, { recursive: true });
-    const logPath = join(args.logsDir, `${args.task.id}-attempt${attempt}-codex.log`);
-    const lastMessagePath = join(args.logsDir, `${args.task.id}-attempt${attempt}-codex.last.txt`);
+    // Output paths carry the account key so two codex accounts (or a refunded
+    // retry on another account) never read each other's saved final message.
+    const acct = args.accountKey ? `-${sanitizeAccountKey(args.accountKey)}` : '';
+    const logPath = join(args.logsDir, `${args.task.id}-attempt${attempt}-codex${acct}.log`);
+    const lastMessagePath = join(args.logsDir, `${args.task.id}-attempt${attempt}-codex${acct}.last.txt`);
 
     const { worktreePath, branch } = prepareWorktree({
       task: args.task,
@@ -689,6 +692,6 @@ export function codexAccountAdapter(
       void opts; // codex usage is probed from local rollouts — no fresh-vs-cached split
       return base.getUsage();
     },
-    runTask: (args: RunTaskArgs) => base.runTask(args),
+    runTask: (args: RunTaskArgs) => base.runTask({ ...args, accountKey: account?.key ?? 'codex' }),
   };
 }

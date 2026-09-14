@@ -858,6 +858,27 @@ describe('PATCH /api/config', () => {
     }
   });
 
+  it('accepts codex accounts, but refuses a patch whose merged config would drop a declared codex account (home collision)', async () => {
+    const ok = await fetch(`${BASE}/api/config`, {
+      method: 'PATCH',
+      body: JSON.stringify({ providers: { codex: { accounts: [
+        { id: 'main', label: 'primary', codexHome: null, priority: null },
+        { id: 'work', label: 'Work', codexHome: '~/review-work', priority: null },
+      ] } } }),
+    });
+    expect(ok.status).toBe(200);
+    // Now point the provider default home at work's home: main would resolve to the same
+    // dir as work, the resolver would drop work, and its affinities would be widened.
+    const collide = await fetch(`${BASE}/api/config`, {
+      method: 'PATCH',
+      body: JSON.stringify({ providers: { codex: { codexHome: '~/review-work' } } }),
+    });
+    expect(collide.status).toBe(400);
+    expect(((await collide.json()) as { error: string }).error).toMatch(/'work' would be dropped/);
+    // Restore for later tests.
+    await fetch(`${BASE}/api/config`, { method: 'PATCH', body: JSON.stringify({ providers: { codex: { codexHome: null, accounts: [] } } }) });
+  });
+
   it('deep-merges, persists via updateConfig, and reflects in /api/state', async () => {
     const patch = {
       reserve: { weeklyPct: 20 },
