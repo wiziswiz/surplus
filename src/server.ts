@@ -37,7 +37,14 @@ import type {
   TaskStatus,
   UsageSnapshot,
 } from './types.js';
-import { defaultClaudeDir, expandTilde, MAX_CLAUDE_ACCOUNTS, resolveAccounts } from './config.js';
+import {
+  assertAccountsResolvable,
+  ConfigValidationError,
+  defaultClaudeDir,
+  expandTilde,
+  MAX_CLAUDE_ACCOUNTS,
+  resolveAccounts,
+} from './config.js';
 import { codexModels } from './models.js';
 import { discoverRepos } from './discover.js';
 
@@ -1059,44 +1066,19 @@ export async function startServer(opts: StartServerOptions): Promise<void> {
     if (!body) return c.json({ error: 'invalid JSON body' }, 400);
     const built = buildConfigPatch(body);
     if (!built.ok) return c.json({ error: built.error }, 400);
-    // Validate the MERGED configuration with the resolver's own normalization:
-    // a patch can be valid on its own yet make a declared account collide with
-    // the provider default home/dir (e.g. codexHome = a non-main account's home),
-    // which the resolver would silently drop — and the cleanup below would then
-    // widen that account's affinities. Refuse instead of saving.
-    const candidate = applyConfigPatch(config, built.patch);
-    const candidateProbe: SurplusConfig = {
-      ...candidate,
-      providers: {
-        claude: { ...candidate.providers.claude, enabled: true },
-        codex: { ...candidate.providers.codex, enabled: true },
-      },
-    };
-    const resolvedIds = new Map<Provider, Set<string>>([
-      ['claude', new Set()],
-      ['codex', new Set()],
-    ]);
-    for (const a of resolveAccounts(candidateProbe)) resolvedIds.get(a.provider)!.add(a.id);
-    for (const prov of PROVIDERS) {
-      const declared = (candidate.providers[prov].accounts ?? []) as Array<{ id?: unknown }>;
-      const dropped = declared
-        .map((a) => (typeof a.id === 'string' ? a.id : ''))
-        .filter((id) => ACCOUNT_ID_RE.test(id) && !resolvedIds.get(prov)!.has(id));
-      if (dropped.length > 0) {
-        return c.json(
-          {
-            error:
-              `providers.${prov}.accounts: ${dropped.map((d) => `'${d}'`).join(', ')} would be dropped — ` +
-              `its ${prov === 'codex' ? 'codexHome' : 'configDir'} duplicates another account's or the provider default`,
-          },
-          400,
-        );
-      }
+    // Pre-check against the in-memory view for a clean 400; the persistence op
+    // re-validates the freshly merged on-disk config (the object actually saved).
+    try {
+      assertAccountsResolvable(applyConfigPatch(config, built.patch));
+    } catch (e) {
+      if (e instanceof ConfigValidationError) return c.json({ error: e.message }, 400);
+      throw e;
     }
     let effective: SurplusConfig;
     try {
       effective = await deps.updateConfig(built.patch);
     } catch (e) {
+      if (e instanceof ConfigValidationError) return c.json({ error: e.message }, 400);
       return c.json({ error: `config update failed: ${errMsg(e)}` }, 500);
     }
     // Mutate the shared config object so /api/state and decide() see the new

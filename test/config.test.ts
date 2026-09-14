@@ -19,6 +19,8 @@ import {
   setPaused,
   surplusDir,
   worktreesDir,
+  assertAccountsResolvable,
+  ConfigValidationError,
 } from '../src/config.js';
 import type { ClaudeAccountConfig, SurplusConfig } from '../src/types.js';
 
@@ -264,6 +266,22 @@ function configWithAccounts(
   else c.providers.claude.accounts = accounts;
   return c;
 }
+
+describe('assertAccountsResolvable', () => {
+  it('passes a clean config and throws ConfigValidationError when a declared account would be dropped', () => {
+    const cfg = defaultConfig();
+    cfg.providers.codex.accounts = [
+      { id: 'main', label: 'primary', codexHome: null, priority: null },
+      { id: 'work', label: 'Work', codexHome: '~/review-work', priority: null },
+    ];
+    expect(() => assertAccountsResolvable(cfg)).not.toThrow();
+    cfg.providers.codex.codexHome = '~/review-work'; // main now resolves to work's home
+    expect(() => assertAccountsResolvable(cfg)).toThrow(ConfigValidationError);
+    expect(() => assertAccountsResolvable(cfg)).toThrow(/'work' would be dropped/);
+    cfg.providers.codex.enabled = false; // disabled is not removed — still validated
+    expect(() => assertAccountsResolvable(cfg)).toThrow(ConfigValidationError);
+  });
+});
 
 describe('resolveAccounts', () => {
   it('enumerates codex accounts by CODEX_HOME: main keeps key "codex", others get codex:<id>, duplicates and default-home non-main entries are skipped', () => {

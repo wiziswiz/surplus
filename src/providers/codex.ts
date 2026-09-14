@@ -36,6 +36,7 @@ import { spawn as nodeSpawn } from 'node:child_process';
 import type { ChildProcess, SpawnOptions } from 'node:child_process';
 import { createWriteStream } from 'node:fs';
 import { mkdir, open, readdir, readFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -461,9 +462,13 @@ export function codexAdapter(config: SurplusConfig, deps: CodexAdapterDeps = {})
     await mkdir(args.logsDir, { recursive: true });
     // Output paths carry the account key so two codex accounts (or a refunded
     // retry on another account) never read each other's saved final message.
+    // …and a per-run tag, because the attempt number is refundable: a refunded
+    // retry on the same account must never read the previous run's saved final
+    // message (a stale quota text would misclassify an infra failure as quota).
     const acct = args.accountKey ? `-${sanitizeAccountKey(args.accountKey)}` : '';
-    const logPath = join(args.logsDir, `${args.task.id}-attempt${attempt}-codex${acct}.log`);
-    const lastMessagePath = join(args.logsDir, `${args.task.id}-attempt${attempt}-codex${acct}.last.txt`);
+    const runTag = randomUUID().slice(0, 8);
+    const logPath = join(args.logsDir, `${args.task.id}-attempt${attempt}-codex${acct}-${runTag}.log`);
+    const lastMessagePath = join(args.logsDir, `${args.task.id}-attempt${attempt}-codex${acct}-${runTag}.last.txt`);
 
     const { worktreePath, branch } = prepareWorktree({
       task: args.task,

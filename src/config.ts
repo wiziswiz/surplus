@@ -306,6 +306,47 @@ export function resolveAccounts(config: SurplusConfig): ResolvedAccount[] {
   return out;
 }
 
+/** Thrown by assertAccountsResolvable: a config the user asked to save would silently lose an account. */
+export class ConfigValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ConfigValidationError';
+  }
+}
+
+/**
+ * Refuse a configuration in which a DECLARED account would be dropped by
+ * resolveAccounts() — its home/profile dir duplicates another account's or the
+ * provider default. Checked with both providers enabled (disabled ≠ removed).
+ * Call it on the exact object about to be persisted, never on a stale copy.
+ */
+export function assertAccountsResolvable(config: SurplusConfig): void {
+  const probe: SurplusConfig = {
+    ...config,
+    providers: {
+      claude: { ...config.providers.claude, enabled: true },
+      codex: { ...config.providers.codex, enabled: true },
+    },
+  };
+  const resolved = new Map<Provider, Set<string>>([
+    ['claude', new Set()],
+    ['codex', new Set()],
+  ]);
+  for (const a of resolveAccounts(probe)) resolved.get(a.provider)!.add(a.id);
+  for (const prov of ['claude', 'codex'] as Provider[]) {
+    const declared = (config.providers[prov].accounts ?? []) as Array<{ id?: unknown }>;
+    const dropped = declared
+      .map((a) => (typeof a.id === 'string' ? a.id : ''))
+      .filter((id) => ACCOUNT_ID_RE.test(id) && !resolved.get(prov)!.has(id));
+    if (dropped.length > 0) {
+      throw new ConfigValidationError(
+        `providers.${prov}.accounts: ${dropped.map((d) => `'${d}'`).join(', ')} would be dropped — ` +
+          `its ${prov === 'codex' ? 'codexHome' : 'configDir'} duplicates another account's or the provider default`,
+      );
+    }
+  }
+}
+
 /**
  * Sanitize an AccountKey for use in filenames (logs, usage caches):
  * lowercased, [a-z0-9-] only ('claude:work' → 'claude-work').

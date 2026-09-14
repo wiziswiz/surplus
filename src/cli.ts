@@ -36,8 +36,7 @@ import {
   configPath,
   surplusDir,
   addClaudeAccount,
-  worktreesDir as worktreesDirPath,
-} from './config.js';
+  worktreesDir as worktreesDirPath, assertAccountsResolvable } from './config.js';
 import { decide } from './decide.js';
 import { openDb } from './db.js';
 import type { SurplusDb, TaskPatch } from './db.js';
@@ -874,6 +873,9 @@ program
           triggerBurn,
           updateConfig: (patch: ConfigPatch) => {
             const next = applyConfigPatch(loadConfig(), patch);
+            // Authoritative check on the freshly merged on-disk config — the
+            // board's in-memory copy may lag a hand edit of config.json.
+            assertAccountsResolvable(next);
             saveConfig(next);
             // Rebuild the live account adapters IN PLACE (the array reference
             // is shared with startServer and triggerBurn) so account
