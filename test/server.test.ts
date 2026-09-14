@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { assertAccountsResolvable } from '../src/config.js';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import * as http from 'node:http';
@@ -414,7 +415,10 @@ beforeAll(async () => {
       },
       updateConfig: (patch) => {
         configPatches.push(patch);
-        return applyConfigPatch(serverConfig, patch);
+        // Mirrors the CLI: validate the exact merged object before it is "persisted".
+        const next = applyConfigPatch(serverConfig, patch);
+        assertAccountsResolvable(next);
+        return next;
       },
     },
     signal: ac.signal,

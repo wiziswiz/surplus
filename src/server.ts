@@ -38,7 +38,6 @@ import type {
   UsageSnapshot,
 } from './types.js';
 import {
-  assertAccountsResolvable,
   ConfigValidationError,
   defaultClaudeDir,
   expandTilde,
@@ -1066,14 +1065,10 @@ export async function startServer(opts: StartServerOptions): Promise<void> {
     if (!body) return c.json({ error: 'invalid JSON body' }, 400);
     const built = buildConfigPatch(body);
     if (!built.ok) return c.json({ error: built.error }, 400);
-    // Pre-check against the in-memory view for a clean 400; the persistence op
-    // re-validates the freshly merged on-disk config (the object actually saved).
-    try {
-      assertAccountsResolvable(applyConfigPatch(config, built.patch));
-    } catch (e) {
-      if (e instanceof ConfigValidationError) return c.json({ error: e.message }, 400);
-      throw e;
-    }
+    // Account-collision validation happens inside updateConfig on the freshly
+    // merged on-disk config (the object actually saved); a ConfigValidationError
+    // from there is mapped to 400 below. No in-memory pre-check: the board's
+    // cached config can lag a hand edit of config.json and reject valid edits.
     let effective: SurplusConfig;
     try {
       effective = await deps.updateConfig(built.patch);
